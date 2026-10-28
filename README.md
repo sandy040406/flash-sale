@@ -75,7 +75,11 @@ flash-sale-system/
 
 ### Full topology (recommended)
 ```bash
-DEMO_MODE=1 docker compose up -d --build     # PowerShell: $env:DEMO_MODE=1; docker compose up -d --build
+# Windows PowerShell:
+$env:DEMO_MODE=1; docker compose up -d --build
+
+# macOS / Linux / Git Bash:
+DEMO_MODE=1 docker compose up -d --build
 ```
 Open **http://localhost/**. Starts NGINX, 2 API replicas (autoscaled up to 8), 2 workers, the autoscaler, Redis and Postgres.
 Watch scaling decisions with `docker logs -f flash_autoscaler`.
@@ -232,7 +236,7 @@ Extrapolation, clearly **not demonstrated**: 10,000 req/s needs roughly 30 API c
 | Clean rebuild (`docker compose down -v`, then `up --build`) | Everything starts from scratch | All containers healthy; oversell demo and 20,000-request run passed |
 
 ### Suggested manual checks
-1. `DEMO_MODE=1 docker compose up -d --build`, open http://localhost/, click **Claim your phone**: one tile turns grey and the ticket moves to Confirmed.
+1. Start the stack (commands in Quick Start), open http://localhost/, click **Claim your phone**: one tile turns grey and the ticket moves to Confirmed.
 2. Open **Audit Lab**, press **Simulate 500-user rush**: stock goes to 0, "Oversold" stays 0, the banner says consistent.
 3. **Reset, open in 30 s**: the button stays locked until the countdown ends, then unlocks.
 4. Run `docker logs -f flash_autoscaler` during a load test to watch replicas scale.
