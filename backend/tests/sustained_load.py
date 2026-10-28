@@ -13,6 +13,7 @@ Env
   DURATION       seconds to run when TOTAL=0 (default 30)
   CONCURRENCY    in-flight requests (default 500)
   TIMEOUT        per-request timeout in seconds (default 10)
+  START_AT       epoch seconds to wait for, so several generator containers start together
 
 Like a browser, the client retries ONCE when a reused keep-alive connection was closed before any
 response arrived (NGINX closes idle keep-alive connections on a graceful reload, which happens when
@@ -34,6 +35,7 @@ TOTAL = int(os.getenv("TOTAL", "0"))
 DURATION = float(os.getenv("DURATION", "30"))
 CONCURRENCY = int(os.getenv("CONCURRENCY", "500"))
 TIMEOUT = float(os.getenv("TIMEOUT", "10"))
+START_AT = float(os.getenv("START_AT", "0"))
 
 SERVED = {202, 403, 409, 410}
 
@@ -81,10 +83,15 @@ async def main():
                     break
             latencies.append((time.perf_counter() - t0) * 1000)
 
+    if START_AT:
+        await asyncio.sleep(max(0.0, START_AT - time.time()))
+        deadline = time.perf_counter() + DURATION
+    started_epoch = time.time()
     start = time.perf_counter()
     async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
         await asyncio.gather(*[worker(session) for _ in range(CONCURRENCY)])
     elapsed = time.perf_counter() - start
+    finished_epoch = time.time()
 
     total = sum(codes.values()) + sum(errors.values())
     served = sum(c for k, c in codes.items() if k in SERVED)
@@ -97,6 +104,7 @@ async def main():
 
     print("=" * 66)
     print(f"target {TARGET_URL}{PATH_}  concurrency {CONCURRENCY}  elapsed {elapsed:.1f}s")
+    print(f"window {started_epoch:.3f} -> {finished_epoch:.3f}")
     print(f"requests {total}  throughput {total / elapsed:,.0f} req/s")
     print(f"latency  p50 {pct(0.5):.0f} ms   p90 {pct(0.9):.0f} ms   p99 {pct(0.99):.0f} ms   max {latencies[-1] if latencies else 0:.0f} ms")
     print(f"status codes: {dict(sorted(codes.items()))}")

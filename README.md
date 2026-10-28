@@ -65,7 +65,7 @@ flash-sale-system/
 │   ├── app.js
 │   └── assets/                  # goml-logo.webp, phone.webp/jpg, fonts/ (self-hosted subsets)
 ├── nginx/nginx.conf
-├── scripts/inline_css.py        # Inlines minified styles.css into index.html
+├── scripts/                     # inline_css.py (critical CSS), distributed_load.sh (100k-request test)
 ├── docker-compose.yml           # NGINX + autoscaled API + workers + autoscaler + Redis + Postgres
 └── docs/                        # ARCHITECTURE_SYSTEM_DESIGN.md, INTERVIEW_DEFENSE_GUIDE.md
 ```
@@ -109,6 +109,7 @@ cd backend && REDIS_DB=1 DATABASE_URL=sqlite+aiosqlite:///./t.db python -m pytes
 python tests/load_test.py          # correctness: 3,000 requests -> exactly 500 sold
 python tests/sustained_load.py     # sustained load with drop accounting (TARGET_URL, DURATION, CONCURRENCY)
 python tests/oversell_demo.py      # reproduces the case study's oversell bug, then shows this system
+scripts/distributed_load.sh 5 20000 400   # 100,000 requests from 5 synchronized containers
 python scripts/inline_css.py       # after editing frontend/styles.css
 ```
 
@@ -152,8 +153,42 @@ Getting to zero took four fixes, each found by reading logs rather than guessing
 
 Oversell grows with concurrency because each in-flight request has already read a stale "stock > 0". The case study's 540 is that effect at roughly 40 in-flight requests.
 
-### Throughput honesty
-About 2,100 to 2,400 req/s through NGINX on this laptop. 100,000 requests in 10 seconds needs about 10,000 req/s, roughly 4 to 5 times more than was measured. The API tier is stateless and scales horizontally, but that target was **not** demonstrated here.
+### Event-loop safety (measured)
+Each API replica reports how late a 100 ms timer fires (`GET /health` → `event_loop_lag_ms`). A handler that blocked the loop (sync I/O, heavy CPU) would show stalls of seconds.
+
+| Load | CPU per replica | Median lateness | p99 | Worst |
+|---|---|---|---|---|
+| Idle | about 0% | 2 ms | 6 ms | 7 ms |
+| At the autoscaler's target (1,324 req/s across 5 replicas, 0 dropped) | about 45% | 0.2 to 0.3 ms | 1 to 6 ms | 46 ms |
+| Saturated (1,500 clients, 8 replicas) | 67 to 86% | 0.6 to 0.7 ms | 18 to 57 ms | 130 ms |
+
+Under saturation the lag is queueing behind other requests' work, not blocking; the autoscaler exists to keep replicas near 50% CPU. A source search also finds no blocking calls (`time.sleep`, sync HTTP/DB drivers, subprocess) on the request path.
+
+### 100,000 requests (`scripts/distributed_load.sh`)
+| Run (API pre-scaled to 8 replicas, 5 synchronized generators) | Time for 100,000 requests | Throughput | Dropped |
+|---|---|---|---|
+| 1 | 42.1 s | 2,377 req/s | **0** |
+| 2 | 38.0 s | 2,633 req/s | **0** |
+| 3 | 38.2 s | 2,616 req/s | **0** |
+| 4 (autoscaler grew the tier to 12 mid-run) | 32.7 s | 3,059 req/s | **0** |
+| 5 | 37.6 s | 2,662 req/s | **0** |
+| `scripts/distributed_load.sh` (final check) | 36.3 s | 2,756 req/s | **0** |
+
+**All 600,000 requests across six runs were served; none were dropped.** But 100,000 requests took about 36 to 42 seconds, not 10 (about 4× too slow for the case study's headline target).
+
+Where the CPU went at the ceiling (10.2 of this laptop's 12 logical cores busy):
+
+| Component | CPU (percent of one core) |
+|---|---|
+| 8 API replicas | 814% |
+| Load generators | 145% |
+| NGINX | 38% |
+| Redis | 18% |
+| Postgres | 4% |
+
+So the **Python API tier is the bottleneck** (about 330 req/s per replica, roughly 3 ms of CPU per request), while the stateful parts have lots of headroom. Growing to 12 replicas was no faster, because the host itself was saturated. Rewriting the rate limiter as plain ASGI and turning off uvicorn's access log made no measurable difference here.
+
+Extrapolation, clearly **not demonstrated**: 10,000 req/s needs roughly 30 API cores (about 4 times this laptop), and Redis would sit near 70% of one core at that rate. That is a handful of ordinary cloud instances, and the API tier is stateless, so it scales by adding replicas. For a known 8 PM launch you would pre-scale (`MIN_REPLICAS`) instead of waiting for the autoscaler to react.
 
 ---
 
@@ -171,6 +206,7 @@ About 2,100 to 2,400 req/s through NGINX on this laptop. 100,000 requests in 10 
 - If the database rejects an already-granted claim, the unit is not returned to Redis (under-selling, never overselling).
 - The autoscaler uses the Docker socket, which is root-equivalent. It is a stand-in for a Kubernetes HPA.
 - Workers are fixed at 2; scale them on stream lag if persistence becomes the bottleneck.
+- The Python API costs about 3 ms of CPU per request. A Go or Node service would likely serve more per core; here we compensate by scaling out.
 
 ---
 

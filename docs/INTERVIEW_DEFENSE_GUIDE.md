@@ -113,3 +113,10 @@
 
 ### 16. "Is the CDN real?"
 * **The Answer:** NGINX stands in for the edge here. Assets are served `immutable` for 30 days and HTML/JS are `no-cache` with ETags, so it is CDN-ready: put CloudFront or Cloudflare in front and fingerprint filenames. Say it is a stand-in, not a real CDN.
+
+### 17. "The brief says Node/Go event-loop safety. Why FastAPI?"
+* **The Answer:** The brief names Node and Go as examples of event-loop runtimes; the requirement is the property, not the language. FastAPI runs on Python's `asyncio`, the same single-threaded event-loop model as Node, so I held to the same rules: stateless processes, no blocking call on the loop, all I/O async. I verified it two ways: a source search found no blocking calls on the request path, and each replica measures event-loop lag (`/health`). At the autoscaler's target load the median lateness is 0.2 to 0.3 ms and p99 is 1 to 6 ms; even saturated at 1,500 clients, p99 stayed under 60 ms and the worst case was 130 ms.
+* **Concede honestly:** one Python process uses one core and costs about 3 ms of CPU per request (about 330 req/s per replica), so a Go service would serve more per core. I compensate by scaling out, and correctness under contention comes from the Redis script, not the language.
+
+### 18. "Can it handle 100,000 requests in 10 seconds?"
+* **The Answer (honest):** Not demonstrated. On one 12-core laptop with 5 synchronized load generators, 100,000 requests took about 36 to 42 seconds (roughly 2,600 req/s), with **0 dropped** in every run. At that ceiling the 8 Python replicas used 814% CPU while Redis used 18% of a core, NGINX 38% and Postgres 4%, so the API tier is the bottleneck and the stateful parts have headroom. At about 330 req/s per replica, 10,000 req/s needs roughly 30 API cores, and Redis would be near 70% of one core. That is a few ordinary cloud instances and the tier is stateless, but I have not run it. For a known 8 PM launch you pre-scale (`MIN_REPLICAS`) instead of waiting for the autoscaler.

@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import hmac
 import time
 import logging
@@ -30,6 +31,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("flash_sale")
 
+# Event-loop lag: how late a 100 ms timer fires. If any handler blocked the loop (sync I/O, heavy CPU),
+# the timer would fire late by about that long. Reported by /health for the last ~60 s.
+LOOP_LAG_INTERVAL = 0.1
+loop_lag_ms = collections.deque(maxlen=600)
+
+async def _monitor_event_loop_lag():
+    while True:
+        started = time.perf_counter()
+        await asyncio.sleep(LOOP_LAG_INTERVAL)
+        loop_lag_ms.append(max(0.0, (time.perf_counter() - started - LOOP_LAG_INTERVAL) * 1000))
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -45,12 +57,14 @@ async def lifespan(app: FastAPI):
         await redis_manager.reset_flash_sale(settings.PRODUCT_ID, settings.INITIAL_STOCK)
     
     # Start background stream consumer
+    lag_task = asyncio.create_task(_monitor_event_loop_lag())
     worker_task = asyncio.create_task(worker.start()) if settings.RUN_WORKER else None
     logger.info("Application startup complete.")
     
     yield
     
     # Shutdown
+    lag_task.cancel()
     logger.info("Shutting down worker and Redis...")
     if worker_task:
         worker.stop()
@@ -115,9 +129,17 @@ async def get_asset(filename: str):
         return FileResponse(file_path)
     raise HTTPException(status_code=404, detail="Asset not found")
 
+def _lag_summary():
+    samples = sorted(loop_lag_ms)
+    if not samples:
+        return {"samples": 0}
+    pick = lambda p: round(samples[min(len(samples) - 1, int(len(samples) * p))], 2)
+    return {"samples": len(samples), "p50": pick(0.5), "p99": pick(0.99), "max": round(samples[-1], 2)}
+
 @app.get("/health")
 async def health_check():
     return {
+        "event_loop_lag_ms": _lag_summary(),
         "status": "online",
         "service": settings.PROJECT_NAME,
         "docs": "/docs",

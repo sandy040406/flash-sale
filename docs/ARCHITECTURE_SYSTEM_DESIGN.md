@@ -251,8 +251,42 @@ What had to be fixed to get here (all found from logs): NGINX passive health che
 
 The 1.5 s requirement is met on the strict profile by about 40 ms. Optimizations applied: critical CSS inlined (removes a render-blocking round trip), self-hosted subset fonts, WebP image at 15 KB, deferred script, wall built after first paint.
 
-### 3.5 Throughput, stated plainly
-About 2,100 to 2,400 req/s through NGINX on this laptop. 100,000 requests in 10 seconds needs about 10,000 req/s, roughly 4 to 5 times more; that target was **not** demonstrated.
+### 3.5 Event-loop safety (the "Node/Go event-loop safety" row)
+The brief names Node and Go as examples of event-loop runtimes. FastAPI on Python's `asyncio` is the same model, so the same rule applies: never block the loop, keep the processes stateless. The application code has no blocking calls on the request path (Redis via `redis.asyncio`, Postgres via `asyncpg`, all waiting via `asyncio.sleep`). It is also measured: each replica reports how late a 100 ms timer fires (`/health`).
+
+| Load | CPU per replica | Median lateness | p99 | Worst |
+|---|---|---|---|---|
+| Idle | about 0% | 2 ms | 6 ms | 7 ms |
+| At the autoscaler's target (1,324 req/s across 5 replicas, 0 dropped) | about 45% | 0.2 to 0.3 ms | 1 to 6 ms | 46 ms |
+| Saturated (1,500 clients, 8 replicas) | 67 to 86% | 0.6 to 0.7 ms | 18 to 57 ms | 130 ms |
+
+Under saturation the lag is queueing behind other requests, not blocking; stalls from a blocking handler would be seconds, not tens of milliseconds.
+
+### 3.6 100,000 requests (`scripts/distributed_load.sh`)
+| Run (API pre-scaled to 8 replicas, 5 synchronized generators) | Time for 100,000 requests | Throughput | Dropped |
+|---|---|---|---|
+| 1 | 42.1 s | 2,377 req/s | **0** |
+| 2 | 38.0 s | 2,633 req/s | **0** |
+| 3 | 38.2 s | 2,616 req/s | **0** |
+| 4 (autoscaler grew the tier to 12 mid-run) | 32.7 s | 3,059 req/s | **0** |
+| 5 | 37.6 s | 2,662 req/s | **0** |
+| `scripts/distributed_load.sh` (final check) | 36.3 s | 2,756 req/s | **0** |
+
+**All 600,000 requests across six runs were served; none were dropped.** But 100,000 requests took about 36 to 42 seconds, not 10 (about 4× too slow for the case study's headline target).
+
+Where the CPU went at the ceiling (10.2 of this laptop's 12 logical cores busy):
+
+| Component | CPU (percent of one core) |
+|---|---|
+| 8 API replicas | 814% |
+| Load generators | 145% |
+| NGINX | 38% |
+| Redis | 18% |
+| Postgres | 4% |
+
+So the **Python API tier is the bottleneck** (about 330 req/s per replica, roughly 3 ms of CPU per request), while the stateful parts have lots of headroom. Growing to 12 replicas was no faster, because the host itself was saturated. Rewriting the rate limiter as plain ASGI and turning off uvicorn's access log made no measurable difference here.
+
+Extrapolation, clearly **not demonstrated**: 10,000 req/s needs roughly 30 API cores (about 4 times this laptop), and Redis would sit near 70% of one core at that rate. That is a handful of ordinary cloud instances, and the API tier is stateless, so it scales by adding replicas. For a known 8 PM launch you would pre-scale (`MIN_REPLICAS`) instead of waiting for the autoscaler to react.
 
 ---
 

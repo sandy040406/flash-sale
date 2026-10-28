@@ -12,5 +12,6 @@ COPY . .
 
 EXPOSE 8000
 
+# --no-access-log: a per-request log line is measurable CPU on a CPU-bound tier (NGINX already logs)
 # keep-alive must outlive NGINX's upstream keepalive (60s) or reused connections get reset mid-request
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "75"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "75", "--no-access-log"]
