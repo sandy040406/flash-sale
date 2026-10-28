@@ -1,8 +1,10 @@
 import asyncio
+import hmac
 import logging
 import uuid
+from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, status, Depends
+from fastapi import FastAPI, HTTPException, Header, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, func, delete, update
@@ -75,7 +77,7 @@ app.add_middleware(
 )
 
 from app.rate_limiter import RateLimitMiddleware
-app.add_middleware(RateLimitMiddleware, requests_per_second=20, burst_allowance=40)
+app.add_middleware(RateLimitMiddleware)
 
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
@@ -163,12 +165,27 @@ async def _process_checkout(payload: CheckoutRequest):
     
     1. Executes single-threaded atomic Lua script in Redis.
     2. Instantly rejects requests if sold out (HTTP 410) or duplicate (HTTP 409).
-    3. If token granted, pushes event into Redis Stream and returns HTTP 202 Accepted.
+    3. If token granted, the same script has already queued the order on the Redis Stream;
+       returns HTTP 202 Accepted.
     """
-    # 1. Execute Atomic Lua Reservation
+    if not settings.SALE_ACTIVE:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "success": False,
+                "status": "NOT_LIVE",
+                "ticket_id": None,
+                "message": "The sale is not live.",
+                "tracking_url": None
+            }
+        )
+
+    # 1. Execute Atomic Lua Reservation (reserves stock AND enqueues the order in one step)
+    ticket_id = f"tok_{uuid.uuid4().hex[:12]}"
     token_status = await redis_manager.reserve_stock_atomic(
         product_id=payload.product_id,
         user_id=payload.user_id,
+        ticket_id=ticket_id,
         quantity=payload.quantity
     )
 
@@ -198,14 +215,7 @@ async def _process_checkout(payload: CheckoutRequest):
             }
         )
 
-    # Case C: Token Granted (1) -> Async Queue Hand-off
-    ticket_id = f"tok_{uuid.uuid4().hex[:12]}"
-    await redis_manager.publish_checkout_event(
-        ticket_id=ticket_id,
-        product_id=payload.product_id,
-        user_id=payload.user_id
-    )
-
+    # Case C: Token Granted (1). The order is already on the stream (queued inside the Lua script).
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
@@ -277,7 +287,15 @@ async def stream_checkout_status(ticket_id: str):
         }
     )
 
-@app.post("/api/v1/admin/reset")
+def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    """Destructive admin actions need the admin token, or demo mode (never use demo mode in production)."""
+    if settings.DEMO_MODE:
+        return
+    if settings.ADMIN_TOKEN and x_admin_token and hmac.compare_digest(x_admin_token, settings.ADMIN_TOKEN):
+        return
+    raise HTTPException(status_code=403, detail="Admin token required")
+
+@app.post("/api/v1/admin/reset", dependencies=[Depends(require_admin)])
 async def reset_flash_sale():
     """Resets inventory back to 500 items in both Redis and Database for clean testing."""
     # 1. Reset Database

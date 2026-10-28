@@ -45,7 +45,7 @@ const simulateRushBtn = document.getElementById('simulateRushBtn');
 const resetSaleBtn = document.getElementById('resetSaleBtn');
 
 // ============================================================================
-// Unit wall: one cell per physical phone, drained right-to-left as stock falls.
+// Unit wall: one cell per physical phone, claimed from the top-left as stock falls.
 // ============================================================================
 const TOTAL_UNITS = 500;
 const wallCells = [];
@@ -66,10 +66,37 @@ function setStock(n) {
   currentStock = n;
   stockCount.textContent = n;
   unitWall.setAttribute('aria-label', `${n} of ${TOTAL_UNITS} units remaining`);
-  const lo = Math.min(n, renderedStock);
-  const hi = Math.max(n, renderedStock);
-  for (let i = lo; i < hi; i++) wallCells[i].classList.toggle('is-claimed', i >= n);
+  // Cell i is claimed once i < sold; only touch the cells that changed.
+  const sold = TOTAL_UNITS - n;
+  const oldSold = TOTAL_UNITS - renderedStock;
+  const lo = Math.min(sold, oldSold);
+  const hi = Math.max(sold, oldSold);
+  const animate = hi - lo <= 10;
+  for (let i = lo; i < hi; i++) {
+    const cell = wallCells[i];
+    const claimed = i < sold;
+    cell.classList.toggle('is-claimed', claimed);
+    if (claimed && animate) {
+      cell.classList.add('just');
+      setTimeout(() => cell.classList.remove('just'), 1000);
+    }
+  }
   renderedStock = n;
+}
+
+// Mark the unit this browser just claimed so a single claim is easy to spot.
+function markMine() {
+  clearMine();
+  const cell = wallCells[TOTAL_UNITS - currentStock - 1];
+  if (cell) {
+    cell.classList.add('is-mine');
+    document.getElementById('mineKey').hidden = false;
+  }
+}
+
+function clearMine() {
+  unitWall.querySelectorAll('.is-mine').forEach(c => c.classList.remove('is-mine'));
+  document.getElementById('mineKey').hidden = true;
 }
 
 // ============================================================================
@@ -210,6 +237,7 @@ buyButton.addEventListener('click', async () => {
 
       // Instantly decrement local stock optimistically
       setStock(currentStock - 1);
+      markMine();
     } 
     else if (response.status === 410) {
       // Sold Out
@@ -324,7 +352,11 @@ function handleTicketStatusUpdate(data) {
     updateTicketUI("FAILED", "Order failed", data.message);
     buyBtnText.textContent = "Claim your phone";
     buyButton.disabled = false;
+    isSubmitting = false;
     btnSpinner.style.display = 'none';
+    // Roll back the optimistic stock drop and our marked tile
+    clearMine();
+    fetchProductStatus();
   }
 }
 
@@ -391,6 +423,7 @@ randomUserBtn.addEventListener('click', () => {
   buyBtnText.textContent = "Claim your phone";
   ticketCard.style.display = 'none';
   btnSpinner.style.display = 'none';
+  clearMine();
 });
 
 // 7. Countdown Timer (Visual Excitement)
@@ -408,6 +441,7 @@ function startCountdownTimer() {
 // 8. Evaluator Drawer & Audit Lab
 auditToggleBtn.addEventListener('click', () => {
   auditDrawer.classList.add('open');
+  document.documentElement.classList.add('drawer-open');
   fetchAuditStats();
   if (drawerPollInterval) clearInterval(drawerPollInterval);
   drawerPollInterval = setInterval(fetchAuditStats, 750);
@@ -415,6 +449,7 @@ auditToggleBtn.addEventListener('click', () => {
 
 closeDrawerBtn.addEventListener('click', () => {
   auditDrawer.classList.remove('open');
+  document.documentElement.classList.remove('drawer-open');
   if (drawerPollInterval) clearInterval(drawerPollInterval);
 });
 
@@ -464,19 +499,27 @@ resetSaleBtn.addEventListener('click', async () => {
   resetSaleBtn.textContent = "Resetting";
   try {
     const res = await fetch(`${API_BASE}/api/v1/admin/reset`, { method: 'POST' });
-    const data = await res.json();
+    if (!res.ok) {
+      resetSaleBtn.textContent = res.status === 403 ? "Reset needs demo mode or admin token" : "Reset failed";
+      setTimeout(() => { resetSaleBtn.disabled = false; resetSaleBtn.textContent = "Reset to 500 units"; }, 3500);
+      return;
+    }
     await fetchProductStatus();
     await fetchAuditStats();
     generateRandomUserId();
     ticketCard.style.display = 'none';
     buyButton.disabled = false;
     isSubmitting = false;
+    clearMine();
     buyBtnText.textContent = "Claim your phone";
   } catch (e) {
-    alert("Failed to reset sale: " + e);
+    resetSaleBtn.textContent = "Reset failed";
+    setTimeout(() => { resetSaleBtn.textContent = "Reset to 500 units"; }, 3500);
   } finally {
-    resetSaleBtn.disabled = false;
-    resetSaleBtn.textContent = "Reset to 500 units";
+    if (resetSaleBtn.textContent === "Resetting") {
+      resetSaleBtn.disabled = false;
+      resetSaleBtn.textContent = "Reset to 500 units";
+    }
   }
 });
 

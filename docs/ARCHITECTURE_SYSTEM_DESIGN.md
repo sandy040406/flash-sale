@@ -1,6 +1,6 @@
 # Technical Case Study & System Design: High-Concurrency Flash Sale Architecture
 **Role Evaluation:** Full-Stack Software Engineer — goML  
-**Candidate Submission Tier:** Exemplary (Strong Hire: 9–10 / 10)  
+**Case study:** goML Full-Stack Software Engineer technical case study  
 **System Target:** 100,000 Concurrent Requests | 500 Inventory Items | 0 Overselling Bug Guarantee
 
 ---
@@ -13,7 +13,7 @@ This document presents a complete re-architected full-stack distributed system d
 1. **Mathematical Zero-Overselling Guarantee:** Exactly 500 physical units sold, 0 oversold items under arbitrary concurrency.
 2. **Sub-Millisecond Edge Rejection:** Requests beyond the available 500 tokens are cleanly rejected or queued in memory (<2ms) without burdening the persistent database.
 3. **Decoupled Asynchronous Persistence:** Immediate `HTTP 202 Accepted` response with tracking tickets, decoupling the high-traffic HTTP cycle from database disk writes.
-4. **Ultra-Lightweight Client UX:** Full bundle size of **~25KB** (well below the 200KB constraint) and **Time-to-Interactive (TTI) < 0.2s** (beating the 1.5s constraint).
+4. **Ultra-Lightweight Client UX:** A first visit downloads about **116 KB raw (about 87 KB transferred)**, including self-hosted fonts and the product image, against the 200KB constraint. The code itself (HTML, CSS, JS) is 40 KB raw and 11 KB gzipped. Time-to-Interactive has not been formally measured; there is no render-blocking third-party request.
 
 ---
 
@@ -94,8 +94,8 @@ The case study asks to evaluate how to handle real-time queue wait status:
   ```
 * **Why this is 100x safer than SQL `SELECT ... THEN UPDATE`:**
   * Under 10,000 RPS, SQL threads interleave and read stale stock.
-  * In Redis Lua, there is **0ms race window**. The check and decrement happen within a single atomic CPU cycle.
-  * Over 99,500 requests are rejected in **< 1.5 milliseconds** directly from Redis memory without touching disk or databases!
+  * In Redis Lua there is **no race window**: Redis runs the whole script to completion before it executes any other command, so no other request can interleave between the check and the decrement.
+  * 99,500 excess requests are rejected directly from Redis memory (one in-memory script call each) without touching disk or the database.
 
 #### C. Message Queues Comparison: Kafka vs. RabbitMQ vs. Redis Streams
 
@@ -128,7 +128,7 @@ Concurrent Load: 100,000 Requests on 1 Row (product_id = 1)
    • Conflict collision rate exceeds 99.9%, causing massive CPU spin and thread starvation.
 
 3. REDIS ATOMIC LUA + ASYNC PERSISTENCE (OUR SOLUTION):
-   • 99,500 excess requests rejected at the Redis layer in < 2ms.
+   • 99,500 excess requests rejected at the Redis layer, from memory.
    • Exactly 500 winners queued into Redis Streams.
    • Controlled background worker writes in batches of 50 to database.
    • Database load: 10 transactions total! 0 lock contention. 0 overselling.
@@ -153,7 +153,7 @@ WHERE id = :product_id AND available_stock >= :batch_size;
             │
             ▼
 ┌────────────────────────────────────────────────────────┐
-│  Layer 1: Frontend Client (<25KB, TTI < 0.2s)          │
+│  Layer 1: Frontend Client (~116KB first visit)          │
 │  - Instant Leading-Edge Click Lock (Anti-Spam)         │
 │  - Optimistic UI Ticket Generation                     │
 │  - Real-Time Virtual Waiting Room (SSE + Fallback)     │
@@ -253,13 +253,13 @@ Perfect Consistency Verified:  ✅ YES (PASSED)
 
 | Case Study Reference Phase & Item | Expected Architecture | Our Implementation in Codebase | Verification Status |
 | :--- | :--- | :--- | :--- |
-| **Phase A.1: Button Throttling/Debouncing** | Lock the UI instantly upon the first click, preventing identical multiple API payloads. | `frontend/app.js` (lines 130–150): Instant leading-edge click lock sets `isSubmitting = true`, disables the DOM button in 0ms, and displays `RESERVING TOKEN...` before making the network call. Rapid subsequent clicks are discarded. | ✅ Fully Implemented |
-| **Phase A.2: CDN Edge Static Serving** | Serve all static assets (HTML, CSS, JS, image variations) directly from edge locations to keep core server free for dynamic operations. | `nginx/nginx.conf` (lines 46–60): Edge caching headers `Cache-Control: public, max-age=2592000, immutable`. Preload hints in `frontend/index.html` (lines 11–15) pre-warm CSS, JS, and optimized WebP (22KB) assets. Code bundle is ~25KB (TTI <0.2s). | ✅ Fully Implemented |
+| **Phase A.1: Button Throttling/Debouncing** | Lock the UI instantly upon the first click, preventing identical multiple API payloads. | `frontend/app.js`: Instant leading-edge click lock sets `isSubmitting = true`, disables the DOM button in 0ms, and displays "Reserving your unit" before making the network call. Rapid subsequent clicks are discarded. | ✅ Fully Implemented |
+| **Phase A.2: CDN Edge Static Serving** | Serve all static assets (HTML, CSS, JS, image variations) directly from edge locations to keep core server free for dynamic operations. | `nginx/nginx.conf`: Edge caching headers (`immutable`, 30 days) on `/assets/` (fonts, logo, images); `index.html`, `app.js` and `styles.css` are served by NGINX with `no-cache` so releases take effect immediately. Fonts are self-hosted and subset (48KB total) and the hero image is preloaded as WebP (22KB). Code is 40KB raw, 11KB gzipped. | ✅ Fully Implemented |
 | **Phase A.3: Local State Manager & SSE/Polling** | Maintain local application state using an optimized state manager to handle real-time wait times gracefully via polling intervals or SSE. | `frontend/app.js`: Explicit `FlashSaleStateManager` reactive class managing queue transitions (`QUEUED` ➔ `PROCESSING` ➔ `CONFIRMED`). UI provides live toggle between Server-Sent Events (SSE) and Dynamic Polling with automated failover. | ✅ Fully Implemented |
-| **Phase B.1: Load Balancing & Clustering** | Deploy NGINX or AWS ALB to evenly distribute incoming traffic to an auto-scaling cluster of stateless application servers. | `nginx/nginx.conf` (lines 33–41) & `docker-compose.yml`: NGINX upstream using `least_conn` distribution across 3 stateless FastAPI backend replicas (`backend_1`, `backend_2`, `backend_3`) with keepalive connections and leaky-bucket bot rate limiter (`limit_req_zone`). | ✅ Fully Implemented |
-| **Phase B.2: Redis High-Performance Token Layer** | Maintain inventory countdown token in Redis cache. Because Redis operations are single-threaded, decrements are inherently atomic. | `backend/app/lua_scripts/reserve_stock.lua` & `backend/app/redis_client.py`: In-memory atomic Lua script executes `GET`, `DECRBY`, and `SADD` within a single Redis CPU cycle. Rejects 99,500 requests in <2ms with zero disk I/O. | ✅ Fully Implemented |
-| **Phase B.3: Asynchronous Message Queue Offloading** | Offload checkout completion to an asynchronous message queue (e.g., RabbitMQ). The API instantly responds with '202 Accepted' status code and polling tracking URL, decoupling the heavy DB write path. | `backend/app/main.py` (lines 187–205): Offloads order event to Redis Streams (`XADD flash_sale_stream`). Instantly returns `HTTP 202 Accepted` with `ticket_id` and `tracking_url: /api/v1/checkout/status/{ticket_id}`. | ✅ Fully Implemented |
-| **Phase C.1: Sequential DB Consumption** | Instead of processing intensive relational DB ops inside main API execution loop, async DB consumers read from message queue sequentially. | `backend/app/worker.py`: Decoupled `OrderProcessingWorker` continuously reads stream batches via Redis Consumer Groups (`xreadgroup`) and persists records without blocking incoming HTTP threads. | ✅ Fully Implemented |
-| **Phase C.2: Strict Conditional SQL Transactions** | Consumer executes strict database transaction with conditional SQL: `UPDATE inventory SET stock = stock - 1 WHERE product_id = :id AND stock > 0`. | `backend/app/worker.py` (lines 78 & 145): Strict conditional SQL `UPDATE products SET available_stock = available_stock - :qty WHERE id = :id AND available_stock >= :qty;` wrapped in ACID transaction. | ✅ Fully Implemented |
+| **Phase B.1: Load Balancing & Clustering** | Deploy NGINX or AWS ALB to evenly distribute incoming traffic to an auto-scaling cluster of stateless application servers. | `nginx/nginx.conf` & `docker-compose.yml`: NGINX upstream using `least_conn` distribution across 3 stateless FastAPI backend replicas (`backend_1`, `backend_2`, `backend_3`) with keepalive connections and leaky-bucket bot rate limiter (`limit_req_zone`). | ✅ Fully Implemented |
+| **Phase B.2: Redis High-Performance Token Layer** | Maintain inventory countdown token in Redis cache. Because Redis operations are single-threaded, decrements are inherently atomic. | `backend/app/lua_scripts/reserve_stock.lua` & `backend/app/redis_client.py`: In-memory atomic Lua script runs `SISMEMBER`, `GET`, `DECRBY`, `SADD`, `XADD` and `HSET` as one unit, so reserving stock and queueing the order can never be separated by a crash. Sold-out requests are rejected from memory without touching the database. | ✅ Fully Implemented |
+| **Phase B.3: Asynchronous Message Queue Offloading** | Offload checkout completion to an asynchronous message queue (e.g., RabbitMQ). The API instantly responds with '202 Accepted' status code and polling tracking URL, decoupling the heavy DB write path. | `backend/app/main.py`: The order is added to the Redis Stream (`XADD flash_sale_stream`) inside the same Lua script that reserves the stock. Instantly returns `HTTP 202 Accepted` with `ticket_id` and `tracking_url: /api/v1/checkout/status/{ticket_id}`. | ✅ Fully Implemented |
+| **Phase C.1: Sequential DB Consumption** | Instead of processing intensive relational DB ops inside main API execution loop, async DB consumers read from message queue sequentially. | `backend/app/worker.py`: Decoupled `OrderProcessingWorker` continuously reads stream batches via Redis Consumer Groups (`xreadgroup`) and persists records without blocking incoming HTTP threads. Messages that were delivered but never acknowledged (consumer crash) are reclaimed with `XAUTOCLAIM` and reprocessed idempotently. | ✅ Fully Implemented |
+| **Phase C.2: Strict Conditional SQL Transactions** | Consumer executes strict database transaction with conditional SQL: `UPDATE inventory SET stock = stock - 1 WHERE product_id = :id AND stock > 0`. | `backend/app/worker.py`: Strict conditional SQL `UPDATE products SET available_stock = available_stock - :qty WHERE id = :id AND available_stock >= :qty;` wrapped in ACID transaction. | ✅ Fully Implemented |
 | **Phase C.3: Zero Overselling Guarantee** | Completely removes possibility of race conditions and entirely eliminates overselling bugs. | Verified empirically via `backend/tests/load_test.py` (1,000 & 3,000 concurrency runs): Exactly 500 confirmed orders, 0 oversold items, 100% mathematical consistency. | ✅ Fully Verified |
 

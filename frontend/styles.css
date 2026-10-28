@@ -304,6 +304,8 @@ button { cursor: pointer; }
 .key { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 .key-open { background: var(--orange); }
 .key-claimed { background: var(--cell-off); }
+.key-mine { background: var(--ink); }
+.wall-legend [hidden] { display: none; }
 
 .wall-count { font-family: var(--mono); font-size: 14px; color: var(--ink-3); }
 .wall-count strong {
@@ -328,6 +330,10 @@ button { cursor: pointer; }
   transition: background-color 0.35s ease;
 }
 .unit-wall i.is-claimed { background: var(--cell-off); }
+.unit-wall i.just { animation: tile-pop 0.9s cubic-bezier(0.2, 0.8, 0.2, 1); }
+.unit-wall i.is-mine { background: var(--ink); animation: tile-ring 1.1s ease-out 3; }
+@keyframes tile-pop { 0% { transform: scale(2.2); background: var(--ink); } 100% { transform: scale(1); } }
+@keyframes tile-ring { 0% { box-shadow: 0 0 0 0 rgba(254, 132, 0, 0.9); } 100% { box-shadow: 0 0 0 12px rgba(254, 132, 0, 0); } }
 @media (min-width: 900px) {
   .unit-wall { grid-template-columns: repeat(50, 1fr); gap: 3px; }
 }
@@ -339,42 +345,51 @@ button { cursor: pointer; }
   right: 0;
   bottom: 0;
   z-index: 40;
-  width: min(440px, 100%);
+  width: min(380px, 100%);
+  padding: 0 20px 24px;
   background: var(--card);
   border-left: 1px solid var(--line);
   box-shadow: -12px 0 40px rgba(17, 19, 26, 0.12);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   transform: translateX(100%);
   visibility: hidden;
   transition: transform 0.25s ease, visibility 0s linear 0.25s;
-  display: flex;
-  flex-direction: column;
 }
 .drawer.open { transform: none; visibility: visible; transition: transform 0.25s ease; }
+html.drawer-open { overflow: hidden; }
+
 .drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 18px 24px;
+  padding: 16px 0 12px;
+  background: var(--card);
   border-bottom: 1px solid var(--line);
 }
-.drawer-head h2 { font-family: var(--display); font-weight: 700; font-size: 22px; letter-spacing: -0.02em; }
+.drawer-head h2 { font-family: var(--display); font-weight: 700; font-size: 20px; letter-spacing: -0.02em; }
 .drawer-close { background: none; border: 0; font-size: 28px; line-height: 1; padding: 0 6px; color: var(--ink-2); }
 .drawer-close:hover { color: var(--ink); }
-.drawer-body { padding: 20px 24px 32px; overflow-y: auto; }
-.drawer-lede { font-size: 14px; color: var(--ink-2); margin-bottom: 18px; }
 
-.audit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.audit-stat { background: var(--paper); border-radius: 12px; padding: 14px 16px; }
-.audit-stat-wide { grid-column: 1 / -1; }
-.audit-stat dt { font-size: 12px; color: var(--ink-3); }
-.audit-stat dd { font-family: var(--mono); font-weight: 500; font-size: 28px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.audit-list > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.audit-list dt { font-size: 14px; color: var(--ink-2); }
+.audit-list dd { font-family: var(--mono); font-weight: 500; font-size: 18px; font-variant-numeric: tabular-nums; }
 
 .consistency {
   display: flex;
   gap: 12px;
   align-items: flex-start;
-  margin-top: 14px;
-  padding: 14px 16px;
+  margin-top: 16px;
+  padding: 12px 14px;
   border-radius: 12px;
   font-size: 14px;
   background: var(--green-bg);
@@ -388,16 +403,7 @@ button { cursor: pointer; }
 .consistency[data-state="bad"] { background: var(--red-bg); }
 .consistency[data-state="bad"] .consistency-dot { background: var(--red); }
 
-.drawer-actions { margin-top: 28px; display: grid; gap: 10px; }
-.drawer-actions h3, .notes summary { font-family: var(--display); font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
-.hint { font-size: 12px; color: var(--ink-3); }
-
-.notes { margin-top: 28px; border-top: 1px solid var(--line); padding-top: 18px; }
-.notes summary { cursor: pointer; }
-.notes h4 { margin: 16px 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--orange-text); }
-.notes ul { padding-left: 18px; font-size: 14px; color: var(--ink-2); }
-.notes li { margin-bottom: 6px; }
-.notes code { font-family: var(--mono); font-size: 12px; background: var(--paper); padding: 1px 5px; border-radius: 4px; }
+.drawer-actions { margin-top: 16px; display: grid; gap: 10px; }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {

@@ -10,7 +10,10 @@ from typing import List, Dict, Any
 # across replicas; stats/reset always go to the first one (shared DB + Redis).
 TARGETS = os.getenv("LOAD_TEST_URLS", "http://127.0.0.1:8000").split(",")
 BASE_URL = TARGETS[0]
-CHECKOUT_ENDPOINT = f"{BASE_URL}/api/v1/checkout"
+# The real /checkout is rate-limited per IP, so a single-machine load test uses the demo path.
+# Start the server with DEMO_MODE=1 (this also allows /admin/reset without a token).
+CHECKOUT_PATH = os.getenv("LOAD_TEST_PATH", "/api/v1/demo/checkout")
+CHECKOUT_ENDPOINT = f"{BASE_URL}{CHECKOUT_PATH}"
 STATS_ENDPOINT = f"{BASE_URL}/api/v1/admin/stats"
 RESET_ENDPOINT = f"{BASE_URL}/api/v1/admin/reset"
 
@@ -27,7 +30,7 @@ async def send_checkout_request(
         "quantity": 1
     }
     try:
-        async with session.post(f"{base_url}/api/v1/checkout", json=payload) as resp:
+        async with session.post(f"{base_url}{CHECKOUT_PATH}", json=payload) as resp:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             data = await resp.json()
             return {

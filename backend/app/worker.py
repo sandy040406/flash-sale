@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import List, Tuple
 from sqlalchemy import update, select
 from sqlalchemy.exc import IntegrityError
@@ -10,9 +11,14 @@ from app.redis_client import redis_manager
 
 logger = logging.getLogger(__name__)
 
+RECLAIM_INTERVAL_SECONDS = 5
+RECLAIM_MIN_IDLE_MS = 15000  # a message unacked this long belongs to a crashed/failed consumer
+
+
 class OrderProcessingWorker:
     def __init__(self):
         self.is_running = False
+        self._last_reclaim = 0.0
 
     async def start(self):
         self.is_running = True
@@ -20,6 +26,10 @@ class OrderProcessingWorker:
         
         while self.is_running:
             try:
+                if time.monotonic() - self._last_reclaim >= RECLAIM_INTERVAL_SECONDS:
+                    self._last_reclaim = time.monotonic()
+                    await self.reclaim_stale()
+
                 # Read stream messages in batches via Consumer Group
                 entries = await redis_manager.client.xreadgroup(
                     groupname=settings.CONSUMER_GROUP,
@@ -50,6 +60,31 @@ class OrderProcessingWorker:
 
     def stop(self):
         self.is_running = False
+
+    async def reclaim_stale(self):
+        """
+        Take over messages that were delivered but never acknowledged (consumer crashed, or an
+        unexpected error skipped the ACK). Reprocessing is safe: the order insert is idempotent
+        on ticket_id, and a batch that already committed falls back to the idempotent path.
+        """
+        start_id = "0-0"
+        while True:
+            result = await redis_manager.client.xautoclaim(
+                settings.STREAM_NAME,
+                settings.CONSUMER_GROUP,
+                settings.CONSUMER_NAME,
+                min_idle_time=RECLAIM_MIN_IDLE_MS,
+                start_id=start_id,
+                count=50,
+            )
+            next_id, messages = result[0], result[1]
+            messages = [(mid, data) for mid, data in messages if data]
+            if messages:
+                logger.warning(f"Reclaimed {len(messages)} stale stream messages for reprocessing.")
+                await self.process_batch(messages)
+            if next_id in ("0-0", b"0-0") or not next_id:
+                break
+            start_id = next_id
 
     async def process_batch(self, messages: List[Tuple[str, dict]]):
         """Processes a batch of order messages in a single ACID transaction for high throughput."""

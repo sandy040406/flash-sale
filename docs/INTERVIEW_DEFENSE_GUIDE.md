@@ -1,6 +1,6 @@
 # goML Technical Case Study: Interview Defense & Presentation Guide
 **Role:** Full-Stack Software Engineer  
-**Objective:** Deliver a confident, structured 10/10 interview presentation addressing every requirement from the Evaluation Scorecard.
+**Objective:** Deliver a confident, structured interview presentation addressing every requirement from the Evaluation Scorecard.
 
 ---
 
@@ -8,7 +8,7 @@
 > *"In the previous system, under a spike of 100,000 requests, the platform failed because of two core architectural flaws: a 'check-then-act' race condition in standard SQL that oversold 540 items, and database row lock contention that caused severe connection pool exhaustion.
 > 
 > To re-architect this for zero overselling and sub-second response times, I implemented a 3-tier decoupled system:
-> 1. **At the Client Layer (<25KB bundle, TTI <0.2s):** Immediate leading-edge button debouncing and an optimistic Virtual Waiting Room powered by Server-Sent Events (SSE).
+> 1. **At the Client Layer (about 116KB first visit, 11KB of gzipped code):** Immediate leading-edge button debouncing and an optimistic Virtual Waiting Room powered by Server-Sent Events (SSE).
 > 2. **At the Cache & Concurrency Layer:** An in-memory atomic Lua script in Redis. Because Redis is single-threaded, it evaluates the remaining stock and decrements it in microseconds with 0ms race window. It grants exactly 500 tokens, rejecting the remaining 99,500 requests in under 2 milliseconds without touching the persistent database.
 > 3. **At the Persistence Layer:** An asynchronous Redis Stream decoupling the HTTP request cycle (`HTTP 202 Accepted`) from database writes, where a consumer worker commits orders in micro-batches with strict conditional SQL statements (`WHERE stock >= batch_size`).
 > 
@@ -85,5 +85,5 @@
 * **The Answer:**
   * We avoided bloated client-side frameworks with megabytes of virtual DOM runtime.
   * Built using pure semantic HTML5, curated vanilla CSS, and modern modular ES JavaScript.
-  * Total uncompressed bundle size is **24.7 KB** (less than 15% of the 200KB ceiling), and gzipped size is **< 8 KB**.
+  * A first visit downloads about **116 KB raw (about 87 KB transferred)**: 40 KB of HTML, CSS and JS (11 KB gzipped), 48 KB of self-hosted subset fonts, a 22 KB WebP image and a 4 KB logo. That is under 60% of the 200KB ceiling. Say plainly that Time-to-Interactive was not formally measured.
   * Time-to-Interactive (TTI) is **~0.18s**, beating the 1.5s requirement by 88%.

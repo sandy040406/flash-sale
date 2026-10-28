@@ -1,49 +1,54 @@
+import logging
 import time
-from collections import defaultdict
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 
+from app.config import settings
+from app.redis_client import redis_manager
+
+logger = logging.getLogger(__name__)
+
+
+def client_ip(request: Request) -> str:
+    """Real client IP. X-Real-IP (set by NGINX) is only honored when TRUST_PROXY_HEADERS is on."""
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("x-real-ip")
+        if forwarded:
+            return forwarded
+    return request.client.host if request.client else "unknown"
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
-    In-memory Sliding Window Rate Limiter.
-    Protects checkout and API endpoints against bot traffic and brute-force spam.
-    Configured for 10 requests per second per IP with burst capacity.
+    Per-IP fixed-window rate limiter backed by Redis, so the limit holds across every replica
+    (an in-memory counter would let a bot get N times the limit by spreading over N replicas).
+
+    Defense in depth behind NGINX's limit_req. There is no User-Agent or header bypass.
+    If Redis is unavailable the limiter fails open; checkout itself needs Redis anyway.
     """
-    def __init__(self, app, requests_per_second: int = 15, burst_allowance: int = 25):
-        super().__init__(app)
-        self.rate = requests_per_second
-        self.burst = burst_allowance
-        self.clients = defaultdict(list)
 
     async def dispatch(self, request: Request, call_next):
-        # Only rate-limit checkout and dynamic API routes (exempt static assets)
-        if request.url.path.startswith("/api/v1/checkout"):
-            client_ip = request.client.host if request.client else "127.0.0.1"
-            current_time = time.time()
-            
-            # Clean timestamps older than 1 second
-            window_start = current_time - 1.0
-            self.clients[client_ip] = [
-                ts for ts in self.clients[client_ip] if ts > window_start
-            ]
-            
-            # Allow burst capacity during benchmark/simulations if user-agent is internal
-            user_agent = request.headers.get("user-agent", "")
-            is_internal_load_test = "aiohttp" in user_agent or "load_test" in user_agent
+        if request.url.path.startswith("/api/v1/checkout") and redis_manager.client is not None:
+            key = f"rl:{client_ip(request)}:{int(time.time())}"
+            try:
+                pipe = redis_manager.client.pipeline(transaction=False)
+                pipe.incr(key)
+                pipe.expire(key, 2)
+                count, _ = await pipe.execute()
+            except Exception as e:
+                logger.warning(f"Rate limiter unavailable, allowing request: {e}")
+                count = 0
 
-            if not is_internal_load_test and len(self.clients[client_ip]) >= self.burst:
+            if count > settings.MAX_REQUESTS_PER_SEC_PER_IP:
                 return JSONResponse(
                     status_code=429,
                     content={
                         "success": False,
                         "status": "RATE_LIMITED",
-                        "message": "Too many requests. Bot protection triggered. Please wait a moment."
+                        "message": "Too many requests. Please wait a moment."
                     },
                     headers={"Retry-After": "1"}
                 )
 
-            self.clients[client_ip].append(current_time)
-
-        response = await call_next(request)
-        return response
+        return await call_next(request)

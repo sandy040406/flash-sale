@@ -103,6 +103,7 @@
           <p class="wall-legend">
             <span><i class="key key-open"></i>Available</span>
             <span><i class="key key-claimed"></i>Claimed</span>
+            <span id="mineKey" hidden><i class="key key-mine"></i>Yours</span>
           </p>
         </div>
         <p class="wall-count" aria-live="polite"><strong id="stockCount">500</strong><span> of 500</span></p>
@@ -117,49 +118,22 @@
       <button id="closeDrawerBtn" class="drawer-close" type="button" aria-label="Close audit panel">&times;</button>
     </div>
 
-    <div class="drawer-body">
-      <p class="drawer-lede">Live reconciliation of what Redis granted against what the database saved.</p>
+    <dl class="audit-list">
+      <div><dt>Initial stock</dt><dd id="auditInitial">500</dd></div>
+      <div><dt>Redis stock</dt><dd id="auditRedis">500</dd></div>
+      <div><dt>In queue</dt><dd id="auditInTransit">0</dd></div>
+      <div><dt>Saved orders</dt><dd id="auditOrders">0</dd></div>
+      <div><dt>Oversold</dt><dd id="auditOversold">0</dd></div>
+    </dl>
 
-      <dl class="audit-grid">
-        <div class="audit-stat"><dt>Initial stock</dt><dd id="auditInitial">500</dd></div>
-        <div class="audit-stat"><dt>Redis stock</dt><dd id="auditRedis">500</dd></div>
-        <div class="audit-stat"><dt>In queue</dt><dd id="auditInTransit">0</dd></div>
-        <div class="audit-stat"><dt>Saved orders</dt><dd id="auditOrders">0</dd></div>
-        <div class="audit-stat audit-stat-wide"><dt>Oversold</dt><dd id="auditOversold">0</dd></div>
-      </dl>
+    <div class="consistency" id="consistencyBanner" data-state="ok">
+      <span class="consistency-dot" aria-hidden="true"></span>
+      <p>Consistent. Every unit is accounted for.</p>
+    </div>
 
-      <div class="consistency" id="consistencyBanner" data-state="ok">
-        <span class="consistency-dot" aria-hidden="true"></span>
-        <p>Consistent. Every unit is accounted for.</p>
-      </div>
-
-      <div class="drawer-actions">
-        <h3>Simulation</h3>
-        <button id="simulateRushBtn" class="btn btn-solid" type="button">Simulate 500 buyers</button>
-        <button id="resetSaleBtn" class="btn btn-outline" type="button">Reset to 500 units</button>
-        <p class="hint">Simulation needs demo mode on the server. Normal checkout stays rate-limited per IP.</p>
-      </div>
-
-      <details class="notes">
-        <summary>How it holds up</summary>
-        <h4>Client</h4>
-        <ul>
-          <li>The button locks on the first click, so duplicate requests never leave the browser.</li>
-          <li>Fonts, images and scripts are self-hosted and cached at the NGINX edge, well under 200 KB in total.</li>
-          <li>Status arrives over Server-Sent Events, with polling as a fallback.</li>
-        </ul>
-        <h4>Gateway and app</h4>
-        <ul>
-          <li>NGINX spreads traffic across three stateless replicas and rate-limits each IP.</li>
-          <li>A Redis Lua script checks and decrements stock in one atomic step.</li>
-          <li>Granted claims return <code>202 Accepted</code> with a tracking URL, and go onto a Redis Stream.</li>
-        </ul>
-        <h4>Data</h4>
-        <ul>
-          <li>Workers drain the stream in micro-batches into a shared Postgres.</li>
-          <li>Each write is conditional: <code>stock &gt; 0</code> inside a transaction, so the database can't oversell either.</li>
-        </ul>
-      </details>
+    <div class="drawer-actions">
+      <button id="simulateRushBtn" class="btn btn-solid" type="button">Simulate 500 buyers</button>
+      <button id="resetSaleBtn" class="btn btn-outline" type="button">Reset to 500 units</button>
     </div>
   </aside>
 

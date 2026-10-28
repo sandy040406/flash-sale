@@ -27,6 +27,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DEMO_MODE=${DEMO_MODE:-0}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - TRUST_PROXY_HEADERS=1
       - CONSUMER_NAME=worker_node_1
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
@@ -46,6 +48,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DEMO_MODE=${DEMO_MODE:-0}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - TRUST_PROXY_HEADERS=1
       - CONSUMER_NAME=worker_node_2
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
@@ -65,6 +69,8 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - DEMO_MODE=${DEMO_MODE:-0}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - TRUST_PROXY_HEADERS=1
       - CONSUMER_NAME=worker_node_3
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:

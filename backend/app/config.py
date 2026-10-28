@@ -25,7 +25,13 @@ class Settings(BaseSettings):
     DEMO_MODE: bool = False
     
     # Rate Limiting & Protection
-    MAX_REQUESTS_PER_SEC_PER_IP: int = 50
+    MAX_REQUESTS_PER_SEC_PER_IP: int = 40
+    # Trust X-Real-IP from the reverse proxy (NGINX) for per-client limits. Only enable when the
+    # backends are reachable solely through the proxy, otherwise clients can spoof their IP.
+    TRUST_PROXY_HEADERS: bool = False
+
+    # Required (via X-Admin-Token header) for destructive admin endpoints unless DEMO_MODE is on
+    ADMIN_TOKEN: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

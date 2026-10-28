@@ -7,6 +7,8 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+TICKET_TTL_SECONDS = 7200  # expire ticket status keys after 2 hours
+
 class RedisManager:
     def __init__(self):
         self.client: Optional[aioredis.Redis] = None
@@ -65,56 +67,33 @@ class RedisManager:
     def _ticket_key(self, ticket_id: str) -> str:
         return f"ticket:{ticket_id}"
 
-    async def reserve_stock_atomic(self, product_id: int, user_id: str, quantity: int = 1) -> int:
+    async def reserve_stock_atomic(self, product_id: int, user_id: str, ticket_id: str, quantity: int = 1) -> int:
         """
-        Executes atomic Lua script.
+        Executes the atomic Lua script: reserve stock AND enqueue the order in one step.
         Returns:
-          1  -> Success (Stock decremented)
+          1  -> Success (stock decremented, order on the stream, ticket QUEUED)
           0  -> Sold out
          -1  -> Already purchased by this user
         """
-        stock_key = self._stock_key(product_id)
-        users_key = self._users_key(product_id)
-        
+        keys_and_args = (
+            4,
+            self._stock_key(product_id),
+            self._users_key(product_id),
+            settings.STREAM_NAME,
+            self._ticket_key(ticket_id),
+            user_id,
+            quantity,
+            ticket_id,
+            product_id,
+            TICKET_TTL_SECONDS,
+        )
         try:
-            result = await self.client.evalsha(
-                self.lua_sha,
-                2,
-                stock_key,
-                users_key,
-                user_id,
-                quantity
-            )
-            return int(result)
+            result = await self.client.evalsha(self.lua_sha, *keys_and_args)
         except aioredis.NoScriptError:
             # Re-cache if script was flushed
             self.lua_sha = await self.client.script_load(self._lua_script_content)
-            result = await self.client.evalsha(
-                self.lua_sha,
-                2,
-                stock_key,
-                users_key,
-                user_id,
-                quantity
-            )
-            return int(result)
-
-    async def publish_checkout_event(self, ticket_id: str, product_id: int, user_id: str) -> str:
-        """Publishes reserved checkout event to Redis Stream for decoupled background persistence."""
-        event_data = {
-            "ticket_id": ticket_id,
-            "product_id": str(product_id),
-            "user_id": str(user_id)
-        }
-        msg_id = await self.client.xadd(settings.STREAM_NAME, event_data)
-        
-        # Save initial ticket status
-        await self.set_ticket_status(ticket_id, "QUEUED", {
-            "product_id": str(product_id),
-            "user_id": str(user_id),
-            "message": "Token acquired. Order processing in queue."
-        })
-        return msg_id
+            result = await self.client.evalsha(self.lua_sha, *keys_and_args)
+        return int(result)
 
     async def set_ticket_status(self, ticket_id: str, status: str, extra: Optional[Dict[str, Any]] = None):
         key = self._ticket_key(ticket_id)
@@ -123,8 +102,7 @@ class RedisManager:
             for k, v in extra.items():
                 mapping[k] = str(v)
         await self.client.hset(key, mapping=mapping)
-        # Expire ticket status key after 2 hours to prevent memory leak
-        await self.client.expire(key, 7200)
+        await self.client.expire(key, TICKET_TTL_SECONDS)
 
     async def get_ticket_status(self, ticket_id: str) -> Dict[str, str]:
         key = self._ticket_key(ticket_id)

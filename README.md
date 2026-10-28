@@ -1,15 +1,14 @@
 # High-Concurrency Flash Sale Architecture (goML Technical Case Study)
 
-> **Zero Overselling Guaranteed Under 100,000+ Concurrent Requests**  
+> **Zero overselling by construction: stock is reserved atomically in Redis and re-checked by the database.**  
 > *Role Evaluation: Full-Stack Software Engineer*  
-> *Scorecard Tier: Exemplary (Strong Hire 10/10)*
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-green.svg)
 ![Redis](https://img.shields.io/badge/Redis-Streams%20%2B%20Lua-red.svg)
 ![Streaming](https://img.shields.io/badge/Real--Time-SSE%20Streaming-purple.svg)
-![Bundle Size](https://img.shields.io/badge/Frontend%20Bundle-%3C25KB-brightgreen.svg)
+![First visit](https://img.shields.io/badge/First%20visit-~116KB-brightgreen.svg)
 ![Status](https://img.shields.io/badge/Audit-100%25%20Consistent-success.svg)
 
 ---
@@ -24,25 +23,27 @@ flash-sale-system/
 │   ├── app/
 │   │   ├── main.py              # FastAPI app, SSE streaming, static mounting, CORS
 │   │   ├── config.py            # Settings & stream configurations
-│   │   ├── database.py          # SQLAlchemy async session with SQLite WAL mode
+│   │   ├── database.py          # SQLAlchemy async engine (Postgres in compose, SQLite locally)
 │   │   ├── models.py            # Product & Order models with strict unique indexes
 │   │   ├── redis_client.py      # Redis async client & Lua script loader
 │   │   ├── rate_limiter.py      # Sliding window token-bucket rate limiter middleware
 │   │   ├── schemas.py           # Pydantic request/response schemas
 │   │   ├── worker.py            # Redis Streams batch persistence consumer
 │   │   └── lua_scripts/
-│   │       └── reserve_stock.lua # In-memory atomic stock reservation (0ms race window)
+│   │       └── reserve_stock.lua # Atomic reserve + enqueue (stock, user set, stream, ticket in one script)
 │   ├── tests/
 │   │   ├── test_basic.py        # Lifecycle integration tests
 │   │   └── load_test.py         # 3,000+ concurrent requests stress test
 │   ├── requirements.txt
 │   └── Dockerfile               # Production container image
-├── frontend/                    # Ultra-lightweight (<25KB, TTI <0.2s)
+├── frontend/                    # ~116KB first visit (40KB code, 11KB gzipped)
 │   ├── index.html               # Semantic HTML5 with preloading & virtual waiting room UI
 │   ├── styles.css               # Luxury dark glassmorphism styling
 │   ├── app.js                   # Client debouncing, SSE streaming & live audit lab
 │   └── assets/
-│       └── phone.jpg            # Product showcase image
+│       ├── goml-logo.webp       # goML logo
+│       ├── phone.webp / phone.jpg
+│       └── fonts/               # Self-hosted subset woff2 (Bricolage Grotesque, Instrument Sans, IBM Plex Mono)
 ├── nginx/
 │   └── nginx.conf               # Edge reverse proxy, least-conn load balancing & rate limiting
 ├── docker-compose.yml           # Multi-replica orchestration (NGINX + 3 Backends + Redis)
@@ -74,11 +75,17 @@ python tests/load_test.py
 
 ## 🐳 Docker Production Multi-Replica Deployment
 
-To launch the full production topology (NGINX Load Balancer + 3 Stateless FastAPI Replicas + Redis Cluster):
+To launch the full production topology (NGINX Load Balancer + 3 Stateless FastAPI Replicas + Redis + shared Postgres):
 ```bash
 docker compose up --build
 ```
 Access the application through the NGINX edge gateway at **`http://localhost/`**.
+
+| Setting (env) | Default | Purpose |
+|---|---|---|
+| `DEMO_MODE` | `0` | Enables the unlimited demo checkout and tokenless `/admin/reset`. Never use in production. |
+| `ADMIN_TOKEN` | empty | Sent as `X-Admin-Token` to allow `/api/v1/admin/reset` when demo mode is off. |
+| `TRUST_PROXY_HEADERS` | `1` in compose | Use NGINX's `X-Real-IP` as the client IP for rate limiting. |
 
 ### Demo mode (500 users from one browser)
 The real `/api/v1/checkout` is rate-limited per IP (bot protection), so one browser cannot
@@ -92,7 +99,7 @@ and reports accepted / sold-out / rate-limited counts. The real endpoint stays r
 
 ---
 
-## 🛡️ Empirical Benchmark Proof
+## 🛡️ Measured Result (3,000 requests across 3 replicas)
 ```
 ======================================================================
 🛡️ MATHEMATICAL DATA CONSISTENCY & ZERO-OVERSELLING AUDIT
@@ -106,6 +113,18 @@ Oversold Count:                0
 Perfect Consistency Verified:  ✅ YES (PASSED)
 ======================================================================
 ```
+
+---
+
+Measured on a laptop with the load generator in Docker: about 1,900 requests/sec and p99 of about 1.4 s for 3,000 requests at 150 concurrency
+(`LOAD_TEST_URLS=http://backend_1:8000,... python tests/load_test.py`, server started with `DEMO_MODE=1`).
+This is **not** a 100,000-request test; it shows correctness (500 sold, 0 oversold) under contention, not production capacity.
+
+### Known limitations
+- NGINX and Redis are single instances (single points of failure). Production would use an ALB pair and Redis with replicas/Sentinel.
+- Each SSE connection polls Redis every 0.5 s. At very large scale this should become Redis pub/sub.
+- The countdown timer on the page is cosmetic; the server only enforces `SALE_ACTIVE`.
+- `user_id` is client-supplied, so one-per-customer relies on authentication in a real deployment; per-IP rate limits are the only abuse control here.
 
 ---
 
