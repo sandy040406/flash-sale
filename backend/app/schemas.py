@@ -29,6 +29,8 @@ class ProductStatusResponse(BaseModel):
     remaining_stock: int
     is_sold_out: bool
     is_live: bool
+    starts_at_ms: Optional[int] = None  # scheduled opening (epoch ms, server clock); None = open
+    server_time_ms: int = 0  # server clock, so the client can sync its countdown
 
 class SystemAuditStats(BaseModel):
     product_id: int

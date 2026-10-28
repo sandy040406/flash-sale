@@ -1,10 +1,11 @@
 import asyncio
 import hmac
+import time
 import logging
 import uuid
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header, status, Depends
+from fastapi import FastAPI, HTTPException, Header, Query, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, func, delete, update
@@ -44,19 +45,20 @@ async def lifespan(app: FastAPI):
         await redis_manager.reset_flash_sale(settings.PRODUCT_ID, settings.INITIAL_STOCK)
     
     # Start background stream consumer
-    worker_task = asyncio.create_task(worker.start())
+    worker_task = asyncio.create_task(worker.start()) if settings.RUN_WORKER else None
     logger.info("Application startup complete.")
     
     yield
     
     # Shutdown
     logger.info("Shutting down worker and Redis...")
-    worker.stop()
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    if worker_task:
+        worker.stop()
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
     await redis_manager.disconnect()
     logger.info("Application shutdown complete.")
 
@@ -122,26 +124,45 @@ async def health_check():
         "sale_product_id": settings.PRODUCT_ID
     }
 
-@app.get("/api/v1/products/{product_id}", response_model=ProductStatusResponse)
-async def get_product_status(product_id: int, db: AsyncSession = Depends(get_db)):
-    """Ultra-fast product endpoint reading remaining stock from Redis cache in <1ms."""
-    redis_stock = await redis_manager.get_remaining_stock(product_id)
-    
-    # Retrieve product metadata from DB
-    result = await db.execute(select(Product).where(Product.id == product_id))
-    product = result.scalar_one_or_none()
-    
+_product_meta_cache: dict = {}
+PRODUCT_META_TTL_SECONDS = 60
+
+async def _get_product_meta(product_id: int):
+    """Static product metadata (name/price/total) cached in-process so polling never touches the DB."""
+    cached = _product_meta_cache.get(product_id)
+    now = time.monotonic()
+    if cached and now - cached[0] < PRODUCT_META_TTL_SECONDS:
+        return cached[1]
+    async with AsyncSessionLocal() as session:
+        product = (await session.execute(select(Product).where(Product.id == product_id))).scalar_one_or_none()
     if not product:
+        return None
+    meta = {"id": product.id, "name": product.name, "price": product.price, "total_stock": product.total_stock}
+    _product_meta_cache[product_id] = (now, meta)
+    return meta
+
+@app.get("/api/v1/products/{product_id}", response_model=ProductStatusResponse)
+async def get_product_status(product_id: int):
+    """Hot polling endpoint: stock and sale window come from Redis; metadata is cached in-process."""
+    meta = await _get_product_meta(product_id)
+    if not meta:
         raise HTTPException(status_code=404, detail="Product not found")
-        
+
+    redis_stock = await redis_manager.get_remaining_stock(product_id)
+    server_time_ms = await redis_manager.server_time_ms()
+    starts_at_ms = await redis_manager.get_sale_start_ms()
+    started = starts_at_ms is None or server_time_ms >= starts_at_ms
+
     return ProductStatusResponse(
-        product_id=product.id,
-        name=product.name,
-        price=product.price,
-        total_stock=product.total_stock,
+        product_id=meta["id"],
+        name=meta["name"],
+        price=meta["price"],
+        total_stock=meta["total_stock"],
         remaining_stock=redis_stock,
         is_sold_out=(redis_stock <= 0),
-        is_live=settings.SALE_ACTIVE
+        is_live=settings.SALE_ACTIVE and started,
+        starts_at_ms=starts_at_ms,
+        server_time_ms=server_time_ms
     )
 
 @app.post("/api/v1/checkout", response_model=CheckoutResponse)
@@ -164,7 +185,8 @@ async def _process_checkout(payload: CheckoutRequest):
     High-Concurrency Flash Sale Ingestion Endpoint.
     
     1. Executes single-threaded atomic Lua script in Redis.
-    2. Instantly rejects requests if sold out (HTTP 410) or duplicate (HTTP 409).
+    2. Instantly rejects requests if the sale is not live (403), sold out (410) or a repeat (409,
+       which returns the customer's existing ticket).
     3. If token granted, the same script has already queued the order on the Redis Stream;
        returns HTTP 202 Accepted.
     """
@@ -181,13 +203,26 @@ async def _process_checkout(payload: CheckoutRequest):
         )
 
     # 1. Execute Atomic Lua Reservation (reserves stock AND enqueues the order in one step)
-    ticket_id = f"tok_{uuid.uuid4().hex[:12]}"
-    token_status = await redis_manager.reserve_stock_atomic(
+    new_ticket_id = f"tok_{uuid.uuid4().hex[:12]}"
+    token_status, ticket_id = await redis_manager.reserve_stock_atomic(
         product_id=payload.product_id,
         user_id=payload.user_id,
-        ticket_id=ticket_id,
+        ticket_id=new_ticket_id,
         quantity=payload.quantity
     )
+
+    # Case N: Sale has not started (decided by the Redis server clock, inside the Lua script)
+    if token_status == -2:
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "success": False,
+                "status": "NOT_LIVE",
+                "ticket_id": None,
+                "message": "The sale has not started yet.",
+                "tracking_url": None
+            }
+        )
 
     # Case A: Sold Out
     if token_status == 0:
@@ -202,16 +237,17 @@ async def _process_checkout(payload: CheckoutRequest):
             }
         )
 
-    # Case B: Duplicate Order by Same User
+    # Case B: Same user again. Idempotent: return THEIR existing ticket, so a client that lost the
+    # first response (timeout, dropped connection) can resume tracking instead of being stranded.
     if token_status == -1:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
                 "success": False,
                 "status": "ALREADY_ORDERED",
-                "ticket_id": None,
-                "message": "Limit 1 per customer. You have already reserved an item.",
-                "tracking_url": None
+                "ticket_id": ticket_id,
+                "message": "Limit 1 per customer. You already hold a unit; here is your ticket.",
+                "tracking_url": f"/api/v1/checkout/status/{ticket_id}"
             }
         )
 
@@ -296,8 +332,8 @@ def require_admin(x_admin_token: Optional[str] = Header(default=None)):
     raise HTTPException(status_code=403, detail="Admin token required")
 
 @app.post("/api/v1/admin/reset", dependencies=[Depends(require_admin)])
-async def reset_flash_sale():
-    """Resets inventory back to 500 items in both Redis and Database for clean testing."""
+async def reset_flash_sale(starts_in: int = Query(default=0, ge=0, le=86400, description="Seconds until the sale opens (0 = open now)")):
+    """Resets inventory back to 500 items in both Redis and Database. starts_in schedules the opening."""
     # 1. Reset Database
     async with AsyncSessionLocal() as session:
         async with session.begin():
@@ -311,12 +347,69 @@ async def reset_flash_sale():
             )
 
     # 2. Reset Redis Cache and Stream
-    await redis_manager.reset_flash_sale(settings.PRODUCT_ID, settings.INITIAL_STOCK)
+    await redis_manager.reset_flash_sale(settings.PRODUCT_ID, settings.INITIAL_STOCK, starts_in_seconds=starts_in)
+    _product_meta_cache.clear()
 
     return {
         "success": True,
         "message": f"Flash sale successfully reset to {settings.INITIAL_STOCK} stock."
+                   + (f" Opens in {starts_in}s." if starts_in else "")
     }
+
+# ---------------------------------------------------------------------------
+# Demo only: the "before" picture. A deliberately naive SELECT-then-UPDATE checkout, kept on a
+# separate product row, so the 540-oversell bug from the case study can be reproduced next to
+# the real system. 404 unless DEMO_MODE=1.
+# ---------------------------------------------------------------------------
+NAIVE_PRODUCT_ID = 2
+
+def _require_demo():
+    if not settings.DEMO_MODE:
+        raise HTTPException(status_code=404, detail="Not found")
+
+@app.post("/api/v1/demo/naive-reset", include_in_schema=False)
+async def naive_reset():
+    _require_demo()
+    async with AsyncSessionLocal() as session:
+        async with session.begin():
+            await session.execute(delete(Order).where(Order.product_id == NAIVE_PRODUCT_ID))
+            exists = (await session.execute(select(Product.id).where(Product.id == NAIVE_PRODUCT_ID))).first()
+            if exists:
+                await session.execute(update(Product).where(Product.id == NAIVE_PRODUCT_ID)
+                                      .values(available_stock=settings.INITIAL_STOCK, total_stock=settings.INITIAL_STOCK))
+            else:
+                session.add(Product(id=NAIVE_PRODUCT_ID, name="Naive checkout (demo)", price=69900,
+                                    total_stock=settings.INITIAL_STOCK, available_stock=settings.INITIAL_STOCK))
+    return {"success": True}
+
+@app.post("/api/v1/demo/naive-checkout", include_in_schema=False)
+async def naive_checkout(payload: CheckoutRequest):
+    """SELECT stock, check in app code, then UPDATE: the classic check-then-act race."""
+    _require_demo()
+    async with AsyncSessionLocal() as session:
+        stock = (await session.execute(
+            select(Product.available_stock).where(Product.id == NAIVE_PRODUCT_ID)
+        )).scalar_one()
+        if stock <= 0:
+            return JSONResponse(status_code=410, content={"status": "SOLD_OUT"})
+        await asyncio.sleep(0.005)  # stand-in for pricing/fraud/validation work between read and write
+        # Relative decrement guarded only by the stale read above: no `AND stock > 0` in the UPDATE.
+        await session.execute(
+            update(Product).where(Product.id == NAIVE_PRODUCT_ID).values(available_stock=Product.available_stock - 1)
+        )
+        session.add(Order(ticket_id=f"naive_{uuid.uuid4().hex[:12]}", product_id=NAIVE_PRODUCT_ID,
+                          user_id=payload.user_id, status="CONFIRMED"))
+        await session.commit()
+    return JSONResponse(status_code=202, content={"status": "ACCEPTED"})
+
+@app.get("/api/v1/demo/naive-stats", include_in_schema=False)
+async def naive_stats():
+    _require_demo()
+    async with AsyncSessionLocal() as session:
+        orders = (await session.execute(
+            select(func.count(Order.id)).where(Order.product_id == NAIVE_PRODUCT_ID)
+        )).scalar_one()
+    return {"orders": orders, "stock": settings.INITIAL_STOCK, "oversold": max(0, orders - settings.INITIAL_STOCK)}
 
 @app.get("/api/v1/admin/stats", response_model=SystemAuditStats)
 async def get_system_audit_stats(db: AsyncSession = Depends(get_db)):

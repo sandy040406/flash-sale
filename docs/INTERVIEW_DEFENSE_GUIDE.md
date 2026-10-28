@@ -8,7 +8,7 @@
 > *"In the previous system, under a spike of 100,000 requests, the platform failed because of two core architectural flaws: a 'check-then-act' race condition in standard SQL that oversold 540 items, and database row lock contention that caused severe connection pool exhaustion.
 > 
 > To re-architect this for zero overselling and sub-second response times, I implemented a 3-tier decoupled system:
-> 1. **At the Client Layer (about 116KB first visit, 11KB of gzipped code):** Immediate leading-edge button debouncing and an optimistic Virtual Waiting Room powered by Server-Sent Events (SSE).
+> 1. **At the Client Layer (81KB first visit, TTI 1.46s on simulated mobile):** Immediate leading-edge button debouncing and an optimistic Virtual Waiting Room powered by Server-Sent Events (SSE).
 > 2. **At the Cache & Concurrency Layer:** An in-memory atomic Lua script in Redis. Because Redis is single-threaded, it evaluates the remaining stock and decrements it in microseconds with 0ms race window. It grants exactly 500 tokens, rejecting the remaining 99,500 requests in under 2 milliseconds without touching the persistent database.
 > 3. **At the Persistence Layer:** An asynchronous Redis Stream decoupling the HTTP request cycle (`HTTP 202 Accepted`) from database writes, where a consumer worker commits orders in micro-batches with strict conditional SQL statements (`WHERE stock >= batch_size`).
 > 
@@ -78,6 +78,7 @@
   2. **Database Level:** The database worker executes a strict conditional SQL update:
      `UPDATE products SET available_stock = available_stock - :qty WHERE id = 1 AND available_stock >= :qty;`
      Even if a duplicate message is delivered or a worker restarts, the database constraint prevents stock from going below 0. Furthermore, the `ticket_id` has a unique database index to enforce absolute idempotency.
+  3. **No lost tokens:** the Lua script reserves stock, records the claim and enqueues the order in one atomic step, so a crash can never burn a unit without an order. Messages a dead worker had read but not acknowledged are reclaimed with `XAUTOCLAIM` and reprocessed idempotently (covered by a test).
 
 ---
 
@@ -85,5 +86,30 @@
 * **The Answer:**
   * We avoided bloated client-side frameworks with megabytes of virtual DOM runtime.
   * Built using pure semantic HTML5, curated vanilla CSS, and modern modular ES JavaScript.
-  * A first visit downloads about **116 KB raw (about 87 KB transferred)**: 40 KB of HTML, CSS and JS (11 KB gzipped), 48 KB of self-hosted subset fonts, a 22 KB WebP image and a 4 KB logo. That is under 60% of the 200KB ceiling. Say plainly that Time-to-Interactive was not formally measured.
-  * Time-to-Interactive (TTI) is **~0.18s**, beating the 1.5s requirement by 88%.
+  * A first visit transfers **81 KB** (Lighthouse): about 12 KB of gzipped HTML (critical CSS inlined) and JS, 48 KB of self-hosted subset fonts, a 15 KB WebP image and a 4 KB logo.
+  * **Measured** TTI (Lighthouse, 3 runs): **1,458 ms** on the strict simulated-mobile profile (Moto G, slow 4G, 4x CPU slowdown), **375 ms** on desktop. Say plainly that the mobile margin is about 40 ms, and that HTTP/2 plus a real CDN would add headroom.
+  * What moved the number: inlining the critical CSS (one fewer round trip before first paint), self-hosted subset fonts, a deferred script, and building the 500-cell wall after first paint.
+
+---
+
+### 10. "Show me the oversell bug, and show me it's fixed."
+* **The Answer:** Run `tests/oversell_demo.py` (needs `DEMO_MODE=1`). It fires the same concurrent buyers at a deliberately naive SELECT-then-UPDATE checkout and at the real one. Naive oversold by **8 / 29 / 59** at concurrency 10 / 40 / 100; the real system oversold by **0** each time. The oversell grows with concurrency because every in-flight request has already read a stale "stock > 0". The case study's 540 is that effect at roughly 40 in-flight requests.
+
+### 11. "Did you identify the N+1 problem?"
+* **The Answer:** Yes. The failing system did per-request database work (read the product, check in code, write, read orders back), so cost grew with request count, and all of it contended on one hot row until the connection pool was exhausted. Now the hot path makes zero database calls (one Redis script). The worker does one batched `UPDATE` and one `IN (...)` select per micro-batch, not a query per order. Only the rare fallback path is per-message.
+
+### 12. "Isn't having both a Redis counter and a database counter the 'double counter' the brief warns against?"
+* **The Answer:** The brief warns against application-level counters: in-process variables or read-modify-write. Redis is the one high-speed gate that decides who gets a token; the database is the durable ledger, and its conditional `UPDATE ... WHERE stock > 0` can never go negative even if Redis were wrong. The audit endpoint reconciles the two (Redis remaining + confirmed orders = 500).
+
+### 13. "How does auto-scaling work, and how do you know you don't drop requests while it scales?"
+* **The Answer:** An autoscaler runs the same loop as a Kubernetes HPA: `desired = ceil(replicas x avgCPU / 50%)`, clamped to 2..8, scale-up immediate (at most doubling), scale-down to the highest recommendation of the last 60 s. It also owns NGINX's upstream list: a replica is added only after its health check passes and removed (then drained) before its container stops. I measured it: **0 dropped** out of 159,278 requests while going 2 -> 8 replicas, and **0 dropped** out of 88,473 while going 8 -> 2. Be upfront about two things: a few requests per scaling event hit a keep-alive connection NGINX was closing and are retried once by the client (safe because checkout is idempotent), and this is one laptop, so 100,000 in 10 seconds was not demonstrated (about 2,200 req/s measured).
+* **What went wrong first (good story):** the first run dropped 4%. Logs showed NGINX passive health checks marking *every* replica down under overload; then the Redis pool ran out of connections (HTTP 500); then keep-alive timeouts were mismatched. Each was fixed from the logs.
+
+### 14. "What happens at exactly 8:00 PM?"
+* **The Answer:** The opening is a timestamp in Redis, enforced inside the Lua script against the Redis server clock, so no client clock can open the sale early. The page loads beforehand (assets cached), counts down using the server clock offset, and unlocks the button at zero. Requests before the start get `403 NOT_LIVE` and never touch stock.
+
+### 15. "What if the network drops after I clicked claim?"
+* **The Answer:** Claims are idempotent. The Lua script stores `user_id -> ticket_id`, so a retry returns the same ticket (409 with the ticket) instead of reserving a second unit. The client retries automatically with backoff and jitter on network errors and 502/503/504, and resumes tracking the original ticket.
+
+### 16. "Is the CDN real?"
+* **The Answer:** NGINX stands in for the edge here. Assets are served `immutable` for 30 days and HTML/JS are `no-cache` with ETags, so it is CDN-ready: put CloudFront or Cloudflare in front and fingerprint filenames. Say it is a stand-in, not a real CDN.

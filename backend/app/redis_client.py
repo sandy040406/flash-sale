@@ -16,12 +16,17 @@ class RedisManager:
         self._lua_script_content: Optional[str] = None
 
     async def connect(self):
-        self.client = aioredis.Redis(
+        # A blocking pool makes a request WAIT (briefly) for a free connection instead of failing with
+        # "Too many connections" when a burst exceeds the pool: waiting is a slower answer, an error is a drop.
+        pool = aioredis.BlockingConnectionPool(
             host=settings.REDIS_HOST,
             port=settings.REDIS_PORT,
             db=settings.REDIS_DB,
-            decode_responses=True
+            decode_responses=True,
+            max_connections=settings.REDIS_MAX_CONNECTIONS,
+            timeout=settings.REDIS_POOL_TIMEOUT_SECONDS,
         )
+        self.client = aioredis.Redis(connection_pool=pool)
         
         # Load Lua script into Redis script cache
         lua_path = Path(__file__).parent / "lua_scripts" / "reserve_stock.lua"
@@ -61,26 +66,32 @@ class RedisManager:
     def _stock_key(self, product_id: int) -> str:
         return f"product:{product_id}:stock"
 
-    def _users_key(self, product_id: int) -> str:
-        return f"product:{product_id}:users"
+    def _claims_key(self, product_id: int) -> str:
+        return f"product:{product_id}:claims"
+
+    @staticmethod
+    def _window_key() -> str:
+        return "sale:window"
 
     def _ticket_key(self, ticket_id: str) -> str:
         return f"ticket:{ticket_id}"
 
-    async def reserve_stock_atomic(self, product_id: int, user_id: str, ticket_id: str, quantity: int = 1) -> int:
+    async def reserve_stock_atomic(self, product_id: int, user_id: str, ticket_id: str, quantity: int = 1) -> Tuple[int, str]:
         """
         Executes the atomic Lua script: reserve stock AND enqueue the order in one step.
-        Returns:
-          1  -> Success (stock decremented, order on the stream, ticket QUEUED)
-          0  -> Sold out
-         -1  -> Already purchased by this user
+        Returns (status, ticket_id):
+          ( 1, new_ticket)       -> Success (stock decremented, order on the stream, ticket QUEUED)
+          ( 0, "")               -> Sold out
+          (-1, existing_ticket)  -> This user already claimed (idempotent retry returns their ticket)
+          (-2, "")               -> Sale not started yet
         """
         keys_and_args = (
-            4,
+            5,
             self._stock_key(product_id),
-            self._users_key(product_id),
+            self._claims_key(product_id),
             settings.STREAM_NAME,
             self._ticket_key(ticket_id),
+            self._window_key(),
             user_id,
             quantity,
             ticket_id,
@@ -93,7 +104,15 @@ class RedisManager:
             # Re-cache if script was flushed
             self.lua_sha = await self.client.script_load(self._lua_script_content)
             result = await self.client.evalsha(self.lua_sha, *keys_and_args)
-        return int(result)
+        return int(result[0]), str(result[1])
+
+    async def server_time_ms(self) -> int:
+        seconds, micros = await self.client.time()
+        return int(seconds) * 1000 + int(micros) // 1000
+
+    async def get_sale_start_ms(self) -> Optional[int]:
+        start = await self.client.hget(self._window_key(), "start")
+        return int(start) if start is not None else None
 
     async def set_ticket_status(self, ticket_id: str, status: str, extra: Optional[Dict[str, Any]] = None):
         key = self._ticket_key(ticket_id)
@@ -112,12 +131,17 @@ class RedisManager:
         stock = await self.client.get(self._stock_key(product_id))
         return int(stock) if stock is not None else 0
 
-    async def reset_flash_sale(self, product_id: int, initial_stock: int = 500):
-        """Pre-warms the cache for the flash sale."""
+    async def reset_flash_sale(self, product_id: int, initial_stock: int = 500, starts_in_seconds: int = 0):
+        """Pre-warms the cache for the flash sale. starts_in_seconds > 0 schedules a future start."""
         stock_key = self._stock_key(product_id)
-        users_key = self._users_key(product_id)
+        claims_key = self._claims_key(product_id)
         await self.client.set(stock_key, initial_stock)
-        await self.client.delete(users_key)
+        await self.client.delete(claims_key)
+        if starts_in_seconds > 0:
+            start_ms = await self.server_time_ms() + starts_in_seconds * 1000
+            await self.client.hset(self._window_key(), "start", start_ms)
+        else:
+            await self.client.delete(self._window_key())
         # Trim stream cleanly without deleting the key so active consumer workers don't get UNBLOCKED errors
         try:
             await self.client.xtrim(settings.STREAM_NAME, maxlen=0)

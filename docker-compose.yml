@@ -1,7 +1,8 @@
-version: '3.8'
+name: flash-sale-system
 
 services:
-  # 1. Edge Layer: NGINX Reverse Proxy, Load Balancer & Rate Limiter
+  # 1. Edge Layer: NGINX Reverse Proxy, Load Balancer & Rate Limiter.
+  #    Its upstream list is managed by the autoscaler (healthy replicas only, drained before removal).
   nginx:
     image: nginx:alpine
     container_name: flash_sale_nginx
@@ -10,27 +11,35 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./frontend:/usr/share/nginx/html:ro
+      - upstream_conf:/etc/nginx/upstream.d:ro   # healthy-replica list, written by the autoscaler
     depends_on:
-      - backend_1
-      - backend_2
-      - backend_3
+      - backend
     networks:
       - flash_net
 
-  # 2. Application Layer: Auto-scaled Stateless FastAPI Clusters
-  backend_1:
+  # 2. Application Layer: stateless FastAPI API replicas. Count is managed by the autoscaler
+  #    (starts at MIN_REPLICAS, scales on CPU). The stream consumer runs in the `worker` service.
+  backend:
+    image: flash-sale-backend:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: flash_backend_1
+    deploy:
+      replicas: ${MIN_REPLICAS:-2}
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - RUN_WORKER=0
       - DEMO_MODE=${DEMO_MODE:-0}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - TRUST_PROXY_HEADERS=1
-      - CONSUMER_NAME=worker_node_1
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     depends_on:
       redis:
         condition: service_started
@@ -39,45 +48,43 @@ services:
     networks:
       - flash_net
 
-  backend_2:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: flash_backend_2
+  # 2b. Dedicated order-persistence workers: same image, no HTTP. Join one Redis consumer group,
+  #     so more containers = more database throughput, independent of the API tier.
+  worker:
+    image: flash-sale-backend:latest
+    command: ["python", "-m", "app.worker_main"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - DEMO_MODE=${DEMO_MODE:-0}
-      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
-      - TRUST_PROXY_HEADERS=1
-      - CONSUMER_NAME=worker_node_2
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
-      redis:
-        condition: service_started
-      postgres:
+      backend:
         condition: service_healthy
     networks:
       - flash_net
 
-  backend_3:
+  # 2c. Autoscaler: scales `backend` between MIN and MAX on average CPU (HPA-style control loop).
+  autoscaler:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: flash_backend_3
+      context: ./autoscaler
+    container_name: flash_autoscaler
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - MIN_REPLICAS=${MIN_REPLICAS:-2}
+      - MAX_REPLICAS=${MAX_REPLICAS:-8}
+      - TARGET_CPU_PERCENT=${TARGET_CPU_PERCENT:-50}
+      - SCALE_DOWN_STABILIZATION_SECONDS=${SCALE_DOWN_STABILIZATION_SECONDS:-60}
+      # compose re-evaluates the file when scaling; keep these identical to the API service
       - DEMO_MODE=${DEMO_MODE:-0}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
-      - TRUST_PROXY_HEADERS=1
-      - CONSUMER_NAME=worker_node_3
-      - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
+      - WORKER_REPLICAS=${WORKER_REPLICAS:-2}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/project:ro
+      - upstream_conf:/upstream
     depends_on:
-      redis:
-        condition: service_started
-      postgres:
-        condition: service_healthy
+      - backend
     networks:
       - flash_net
 
@@ -85,6 +92,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: flash_postgres
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       - POSTGRES_USER=flash
       - POSTGRES_PASSWORD=flash
@@ -97,7 +105,7 @@ services:
     networks:
       - flash_net
 
-  # 3b. Distributed Cache & Stream Layer: High-Performance Redis
+  # 3b. Distributed Cache & Stream Layer: Redis with AOF persistence
   redis:
     image: redis:7-alpine
     container_name: flash_redis
@@ -106,6 +114,9 @@ services:
     command: redis-server --appendonly yes --protected-mode no
     networks:
       - flash_net
+
+volumes:
+  upstream_conf:
 
 networks:
   flash_net:

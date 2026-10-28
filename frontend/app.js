@@ -9,6 +9,16 @@ let isSubmitting = false;
 let currentStock = 500;
 let drawerPollInterval = null;
 
+// Sale window, as reported by the server. The countdown runs off the SERVER clock
+// (offset measured on each status fetch), so a wrong device clock can't open the sale early.
+let saleLive = true;
+let saleStartsAtMs = null;
+let clockOffsetMs = 0;
+let lastZeroFetch = 0;
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
+
 // DOM Elements
 const buyButton = document.getElementById('buyButton');
 const buyBtnText = document.getElementById('buyBtnText');
@@ -17,6 +27,8 @@ const userIdInput = document.getElementById('userIdInput');
 const randomUserBtn = document.getElementById('randomUserBtn');
 
 const stockCount = document.getElementById('stockCount');
+const timerLabel = document.getElementById('timerLabel');
+const scheduleSaleBtn = document.getElementById('scheduleSaleBtn');
 const unitWall = document.getElementById('unitWall');
 const countdownTimer = document.getElementById('countdownTimer');
 const engineStatus = document.getElementById('engineStatus');
@@ -59,6 +71,10 @@ function buildWall() {
     frag.appendChild(cell);
   }
   unitWall.appendChild(frag);
+  // The first status response may already have arrived: paint the current stock now
+  const known = currentStock;
+  renderedStock = TOTAL_UNITS;
+  setStock(known);
 }
 
 function setStock(n) {
@@ -66,6 +82,7 @@ function setStock(n) {
   currentStock = n;
   stockCount.textContent = n;
   unitWall.setAttribute('aria-label', `${n} of ${TOTAL_UNITS} units remaining`);
+  if (!wallCells.length) return;  // wall not built yet; buildWall() will paint this value
   // Cell i is claimed once i < sold; only touch the cells that changed.
   const sold = TOTAL_UNITS - n;
   const oldSold = TOTAL_UNITS - renderedStock;
@@ -149,14 +166,18 @@ if (protocolModeSelect) {
 }
 
 // 1. Initialization
-document.addEventListener('DOMContentLoaded', () => {
-  buildWall();
+// `defer` means the DOM is already parsed when this runs (DOMContentLoaded fires right after), so
+// first paint isn't held up by this script. The 500-cell wall is built after that first paint.
+function init() {
+  requestAnimationFrame(() => setTimeout(buildWall, 0));
   fetchProductStatus();
   fetchAuditStats();
   startStockPolling();
   startCountdownTimer();
   generateRandomUserId();
-});
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+else init();
 
 // 2. Fetch Product Status & Update Stock Meter
 async function fetchProductStatus() {
@@ -168,9 +189,19 @@ async function fetchProductStatus() {
     stateManager.set({ currentStock: data.remaining_stock });
     setStock(data.remaining_stock);
 
+    saleStartsAtMs = data.starts_at_ms;
+    clockOffsetMs = data.server_time_ms - Date.now();
+    saleLive = data.is_live;
+
     if (data.remaining_stock <= 0) {
       buyButton.disabled = true;
       buyBtnText.textContent = "Sold out";
+    } else if (!saleLive && !isSubmitting) {
+      buyButton.disabled = true;
+      buyBtnText.textContent = "Sale opens soon";
+    } else if (saleLive && buyBtnText.textContent === "Sale opens soon") {
+      buyButton.disabled = false;
+      buyBtnText.textContent = "Claim your phone";
     }
     engineStatus.textContent = "Live";
     engineStatus.dataset.state = "live";
@@ -186,10 +217,35 @@ function startStockPolling() {
   setInterval(fetchProductStatus, 3000);
 }
 
+// Checkout with bounded retries. Retrying is SAFE because the server makes checkout idempotent:
+// the Lua script keys claims by user_id, so a repeat returns the original ticket (409) instead of
+// reserving a second unit. Network errors and 502/503/504 are retried with backoff and jitter.
+async function postCheckout(body) {
+  const delays = [0, 350, 1000];
+  let lastResponse = null;
+  let lastError = null;
+  for (const delay of delays) {
+    if (delay) await sleep(jitter(delay));
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if ([502, 503, 504].includes(res.status)) { lastResponse = res; continue; }
+      return res;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  if (lastResponse) return lastResponse;
+  throw lastError;
+}
+
 // 4. Client-Side Click Debounce & Lock Engine
 buyButton.addEventListener('click', async () => {
   // Prevent repetitive API spamming
-  if (isSubmitting || currentStock <= 0) return;
+  if (isSubmitting || currentStock <= 0 || !saleLive) return;
   
   const userId = userIdInput.value.trim();
   if (!userId) {
@@ -212,16 +268,7 @@ buyButton.addEventListener('click', async () => {
   stepRedis.classList.add('step-done');
 
   try {
-    const response = await fetch(`${API_BASE}/api/v1/checkout`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id: userId,
-        product_id: PRODUCT_ID,
-        quantity: 1
-      })
-    });
-
+    const response = await postCheckout({ user_id: userId, product_id: PRODUCT_ID, quantity: 1 });
     const result = await response.json();
 
     if (response.status === 202) {
@@ -247,13 +294,21 @@ buyButton.addEventListener('click', async () => {
       isSubmitting = false;
       btnSpinner.style.display = 'none';
     } 
-    else if (response.status === 409) {
-      // Duplicate order
-      updateTicketUI("FAILED", "Already claimed", "This customer ID already has a unit. Use a different ID to claim another.");
-      buyBtnText.textContent = "Already claimed";
-      buyButton.disabled = false;
+    else if (response.status === 409 && result.ticket_id) {
+      // This customer already holds a unit (e.g. a retry after a lost response): resume THEIR ticket
+      ticketIdDisplay.textContent = result.ticket_id;
+      stepStream.classList.add('step-done');
+      updateTicketUI("PROCESSING", "You already hold a unit", "Showing your existing ticket.");
+      trackTicketStatus(result.ticket_id);
+      buyBtnText.textContent = "Claimed";
+      btnSpinner.style.display = 'none';
+    }
+    else if (response.status === 403 && result.status === 'NOT_LIVE') {
+      updateTicketUI("FAILED", "Sale has not started", "The button unlocks when the countdown ends.");
+      buyBtnText.textContent = "Sale opens soon";
       isSubmitting = false;
       btnSpinner.style.display = 'none';
+      fetchProductStatus();
     }
     else {
       // 429 (rate limited), 5xx, etc: release the lock so the user is never stuck
@@ -360,30 +415,37 @@ function handleTicketStatusUpdate(data) {
   }
 }
 
+// Adaptive polling: starts fast (the order usually confirms within a second), backs off
+// exponentially to 2 s, and adds jitter so thousands of clients don't poll in lockstep.
 function startTicketStatusPolling(ticketId) {
-  let timer = stateManager.get('pollingInterval');
-  if (timer) clearInterval(timer);
+  const existing = stateManager.get('pollingInterval');
+  if (existing) clearTimeout(existing);
 
   let attempts = 0;
-  timer = setInterval(async () => {
+  let delay = 300;
+
+  const tick = async () => {
     attempts++;
+    let finished = false;
     try {
       const res = await fetch(`${API_BASE}/api/v1/checkout/status/${ticketId}`);
-      if (!res.ok) return;
-
-      const data = await res.json();
-      handleTicketStatusUpdate(data);
-
-      if (data.status === 'CONFIRMED' || data.status === 'FAILED' || attempts > 30) {
-        clearInterval(timer);
-        stateManager.set({ pollingInterval: null });
+      if (res.ok) {
+        const data = await res.json();
+        handleTicketStatusUpdate(data);
+        finished = data.status === 'CONFIRMED' || data.status === 'FAILED';
       }
     } catch (e) {
       console.warn("Polling error:", e);
     }
-  }, 400);
+    if (finished || attempts > 40) {
+      stateManager.set({ pollingInterval: null });
+      return;
+    }
+    delay = Math.min(2000, delay * 1.5);
+    stateManager.set({ pollingInterval: setTimeout(tick, jitter(delay)) });
+  };
 
-  stateManager.set({ pollingInterval: timer });
+  stateManager.set({ pollingInterval: setTimeout(tick, delay) });
 }
 
 // 6. UI Helpers
@@ -426,15 +488,33 @@ randomUserBtn.addEventListener('click', () => {
   clearMine();
 });
 
-// 7. Countdown Timer (Visual Excitement)
+// 7. Sale countdown, driven by the server clock
+function formatCountdown(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(sec).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
 function startCountdownTimer() {
-  let seconds = 15 * 60 - 1;
   setInterval(() => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    countdownTimer.textContent = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-    if (seconds > 0) seconds--;
-  }, 1000);
+    const now = Date.now() + clockOffsetMs;
+    if (saleStartsAtMs && now < saleStartsAtMs) {
+      timerLabel.textContent = 'Sale opens in';
+      countdownTimer.textContent = formatCountdown(saleStartsAtMs - now);
+    } else {
+      timerLabel.textContent = 'Sale is';
+      countdownTimer.textContent = currentStock <= 0 ? 'Sold out' : 'Live now';
+      // The countdown reached zero locally: ask the server to confirm and unlock the button
+      if (!saleLive && Date.now() - lastZeroFetch > 700) {
+        lastZeroFetch = Date.now();
+        fetchProductStatus();
+      }
+    }
+  }, 250);
 }
 
 // 8. Evaluator Drawer & Audit Lab
@@ -492,36 +572,39 @@ function updateAuditStatsUI(stats) {
   consistencyBanner.querySelector('p').textContent = text;
 }
 
-// 9. Reset Flash Sale Button
-resetSaleBtn.addEventListener('click', async () => {
-  if (!confirm("Reset flash sale back to 500 items?")) return;
-  resetSaleBtn.disabled = true;
-  resetSaleBtn.textContent = "Resetting";
+// 9. Reset buttons (optionally scheduling the opening N seconds ahead)
+async function resetSale(btn, idleLabel, startsIn) {
+  if (!confirm("Reset the sale back to 500 units?")) return;
+  btn.disabled = true;
+  btn.textContent = "Resetting";
   try {
-    const res = await fetch(`${API_BASE}/api/v1/admin/reset`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/api/v1/admin/reset?starts_in=${startsIn}`, { method: 'POST' });
     if (!res.ok) {
-      resetSaleBtn.textContent = res.status === 403 ? "Reset needs demo mode or admin token" : "Reset failed";
-      setTimeout(() => { resetSaleBtn.disabled = false; resetSaleBtn.textContent = "Reset to 500 units"; }, 3500);
+      btn.textContent = res.status === 403 ? "Reset needs demo mode or admin token" : "Reset failed";
+      setTimeout(() => { btn.disabled = false; btn.textContent = idleLabel; }, 3500);
       return;
     }
+    clearMine();
+    isSubmitting = false;
+    ticketCard.style.display = 'none';
+    buyBtnText.textContent = "Claim your phone";
+    buyButton.disabled = false;
+    generateRandomUserId();
     await fetchProductStatus();
     await fetchAuditStats();
-    generateRandomUserId();
-    ticketCard.style.display = 'none';
-    buyButton.disabled = false;
-    isSubmitting = false;
-    clearMine();
-    buyBtnText.textContent = "Claim your phone";
   } catch (e) {
-    resetSaleBtn.textContent = "Reset failed";
-    setTimeout(() => { resetSaleBtn.textContent = "Reset to 500 units"; }, 3500);
+    btn.textContent = "Reset failed";
+    setTimeout(() => { btn.textContent = idleLabel; }, 3500);
   } finally {
-    if (resetSaleBtn.textContent === "Resetting") {
-      resetSaleBtn.disabled = false;
-      resetSaleBtn.textContent = "Reset to 500 units";
+    if (btn.textContent === "Resetting") {
+      btn.disabled = false;
+      btn.textContent = idleLabel;
     }
   }
-});
+}
+
+resetSaleBtn.addEventListener('click', () => resetSale(resetSaleBtn, "Reset to 500 units", 0));
+scheduleSaleBtn.addEventListener('click', () => resetSale(scheduleSaleBtn, "Reset, open in 30 s", 30));
 
 // 10. Simulate 500-User Surge Button
 // Uses the demo-only endpoint (no per-IP limit, needs DEMO_MODE=1 on the server) so one

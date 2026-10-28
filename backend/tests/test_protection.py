@@ -100,7 +100,7 @@ async def test_unacked_message_from_crashed_consumer_is_reclaimed(monkeypatch):
         # Grant a token (stock reserved + order enqueued atomically), then have a consumer read
         # it and "crash" without acknowledging.
         ticket_id = "tok_crashtest01"
-        assert await redis_manager.reserve_stock_atomic(settings.PRODUCT_ID, "crash_user", ticket_id) == 1
+        assert (await redis_manager.reserve_stock_atomic(settings.PRODUCT_ID, "crash_user", ticket_id))[0] == 1
         got = await redis_manager.client.xreadgroup(
             settings.CONSUMER_GROUP, "crashed_consumer", {settings.STREAM_NAME: ">"}, count=10
         )
@@ -125,3 +125,42 @@ async def test_unacked_message_from_crashed_consumer_is_reclaimed(monkeypatch):
         assert stuck == []
     finally:
         await redis_manager.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_repeat_claim_returns_the_original_ticket():
+    """A client that lost the first response can retry and resume tracking its own ticket."""
+    async with app.router.lifespan_context(app):
+        async with await _client() as client:
+            await client.post("/api/v1/admin/reset")
+            body = {"user_id": "retry_user", "product_id": settings.PRODUCT_ID, "quantity": 1}
+            first = await client.post("/api/v1/demo/checkout", json=body)
+            again = await client.post("/api/v1/demo/checkout", json=body)
+            assert first.status_code == 202
+            assert again.status_code == 409
+            assert again.json()["ticket_id"] == first.json()["ticket_id"]
+            assert again.json()["tracking_url"] == first.json()["tracking_url"]
+            await client.post("/api/v1/admin/reset")
+
+
+@pytest.mark.asyncio
+async def test_sale_window_is_enforced_by_the_server_clock():
+    async with app.router.lifespan_context(app):
+        async with await _client() as client:
+            await client.post("/api/v1/admin/reset", params={"starts_in": 30})
+            product = (await client.get(f"/api/v1/products/{settings.PRODUCT_ID}")).json()
+            assert product["is_live"] is False
+            assert product["starts_at_ms"] - product["server_time_ms"] > 25_000
+
+            body = {"user_id": "early_bird", "product_id": settings.PRODUCT_ID, "quantity": 1}
+            early = await client.post("/api/v1/demo/checkout", json=body)
+            assert early.status_code == 403
+            assert early.json()["status"] == "NOT_LIVE"
+
+            # Opening the sale (reset with no delay) lets the same user in, and stock was untouched
+            await client.post("/api/v1/admin/reset")
+            product = (await client.get(f"/api/v1/products/{settings.PRODUCT_ID}")).json()
+            assert product["is_live"] is True and product["remaining_stock"] == settings.INITIAL_STOCK
+            ok = await client.post("/api/v1/demo/checkout", json=body)
+            assert ok.status_code == 202
+            await client.post("/api/v1/admin/reset")
