@@ -1,9 +1,13 @@
 // Configuration
-const API_BASE = window.location.origin.includes(':8000') 
-  ? window.location.origin 
-  : 'http://127.0.0.1:8000';
+// Same-origin relative URLs: works behind NGINX (:80) and when served directly by uvicorn (:8000)
+const API_BASE = '';
 
 const PRODUCT_ID = 1;
+
+// Click-lock and drawer state (read by the handlers below)
+let isSubmitting = false;
+let currentStock = 500;
+let drawerPollInterval = null;
 
 // DOM Elements
 const buyButton = document.getElementById('buyButton');
@@ -105,6 +109,7 @@ async function fetchProductStatus() {
     if (!res.ok) throw new Error('API unreachable');
     const data = await res.json();
     
+    currentStock = data.remaining_stock;
     stateManager.set({ currentStock: data.remaining_stock });
     stockCount.textContent = data.remaining_stock;
     const percentage = Math.max(0, (data.remaining_stock / 500) * 100);
@@ -189,6 +194,14 @@ buyButton.addEventListener('click', async () => {
       // Duplicate order
       updateTicketUI("FAILED", "Order Limit Reached", result.message);
       buyBtnText.textContent = "ALREADY ORDERED";
+      buyButton.disabled = false;
+      isSubmitting = false;
+      btnSpinner.style.display = 'none';
+    }
+    else {
+      // 429 (rate limited), 5xx, etc: release the lock so the user is never stuck
+      updateTicketUI("FAILED", response.status === 429 ? "Too Many Requests" : "Checkout Unavailable", result.message || "Please try again in a moment.");
+      buyBtnText.textContent = "CLAIM SMARTPHONE NOW";
       buyButton.disabled = false;
       isSubmitting = false;
       btnSpinner.style.display = 'none';

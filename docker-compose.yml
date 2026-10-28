@@ -26,9 +26,13 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - WORKER_NAME=worker_node_1
+      - CONSUMER_NAME=worker_node_1
+      - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks:
       - flash_net
 
@@ -40,9 +44,13 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - WORKER_NAME=worker_node_2
+      - CONSUMER_NAME=worker_node_2
+      - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks:
       - flash_net
 
@@ -54,19 +62,39 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - WORKER_NAME=worker_node_3
+      - CONSUMER_NAME=worker_node_3
+      - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     networks:
       - flash_net
 
-  # 3. Distributed Cache & Stream Layer: High-Performance Redis
+  # 3a. Shared ACID Database: single source of truth for all replicas
+  postgres:
+    image: postgres:16-alpine
+    container_name: flash_postgres
+    environment:
+      - POSTGRES_USER=flash
+      - POSTGRES_PASSWORD=flash
+      - POSTGRES_DB=flashsale
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flash -d flashsale"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks:
+      - flash_net
+
+  # 3b. Distributed Cache & Stream Layer: High-Performance Redis
   redis:
     image: redis:7-alpine
     container_name: flash_redis
     ports:
       - "6379:6379"
-    command: redis-server --appendonly no --save "" --protected-mode no
+    command: redis-server --appendonly yes --protected-mode no
     networks:
       - flash_net
 

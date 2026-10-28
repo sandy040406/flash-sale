@@ -15,8 +15,8 @@ class Product(Base):
     price = Column(Integer, nullable=False) # In cents or smallest unit
     total_stock = Column(Integer, nullable=False, default=500)
     available_stock = Column(Integer, nullable=False, default=500)
-    created_at = Column(DateTime, default=utcnow)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     orders = relationship("Order", back_populates="product")
 
@@ -28,7 +28,7 @@ class Order(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     user_id = Column(String(64), nullable=False, index=True)
     status = Column(String(20), nullable=False, default="CONFIRMED") # CONFIRMED, FAILED
-    created_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime(timezone=True), default=utcnow)
 
     product = relationship("Product", back_populates="orders")
 

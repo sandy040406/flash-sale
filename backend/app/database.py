@@ -1,6 +1,6 @@
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import select
+from sqlalchemy import select, text
 from app.config import settings
 from app.models import Base, Product
 
@@ -36,20 +36,22 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 async def init_db():
+    # Replicas boot concurrently against a shared Postgres: serialize schema
+    # creation and seeding with a transaction-scoped advisory lock.
     async with engine.begin() as conn:
+        if "postgresql" in settings.DATABASE_URL:
+            await conn.execute(text("SELECT pg_advisory_xact_lock(727001)"))
         await conn.run_sync(Base.metadata.create_all)
-    
-    # Pre-seed initial product if it doesn't exist
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Product).where(Product.id == settings.PRODUCT_ID))
-        product = result.scalar_one_or_none()
-        if not product:
-            product = Product(
-                id=settings.PRODUCT_ID,
-                name="Flagship Ultra 5G (Limited Festival Edition)",
-                price=69900,
-                total_stock=settings.INITIAL_STOCK,
-                available_stock=settings.INITIAL_STOCK
+
+        # Pre-seed initial product if it doesn't exist
+        result = await conn.execute(select(Product.id).where(Product.id == settings.PRODUCT_ID))
+        if result.first() is None:
+            await conn.execute(
+                Product.__table__.insert().values(
+                    id=settings.PRODUCT_ID,
+                    name="Flagship Ultra 5G (Limited Festival Edition)",
+                    price=69900,
+                    total_stock=settings.INITIAL_STOCK,
+                    available_stock=settings.INITIAL_STOCK,
+                )
             )
-            session.add(product)
-            await session.commit()

@@ -1,11 +1,15 @@
 import asyncio
+import os
 import time
 import uuid
 import aiohttp
 import statistics
 from typing import List, Dict, Any
 
-BASE_URL = "http://127.0.0.1:8000"
+# LOAD_TEST_URLS="http://backend_1:8000,http://backend_2:8000,..." spreads requests round-robin
+# across replicas; stats/reset always go to the first one (shared DB + Redis).
+TARGETS = os.getenv("LOAD_TEST_URLS", "http://127.0.0.1:8000").split(",")
+BASE_URL = TARGETS[0]
 CHECKOUT_ENDPOINT = f"{BASE_URL}/api/v1/checkout"
 STATS_ENDPOINT = f"{BASE_URL}/api/v1/admin/stats"
 RESET_ENDPOINT = f"{BASE_URL}/api/v1/admin/reset"
@@ -13,7 +17,8 @@ RESET_ENDPOINT = f"{BASE_URL}/api/v1/admin/reset"
 async def send_checkout_request(
     session: aiohttp.ClientSession, 
     user_id: str, 
-    product_id: int = 1
+    product_id: int = 1,
+    base_url: str = BASE_URL
 ) -> Dict[str, Any]:
     start_time = time.perf_counter()
     payload = {
@@ -22,7 +27,7 @@ async def send_checkout_request(
         "quantity": 1
     }
     try:
-        async with session.post(CHECKOUT_ENDPOINT, json=payload) as resp:
+        async with session.post(f"{base_url}/api/v1/checkout", json=payload) as resp:
             latency_ms = (time.perf_counter() - start_time) * 1000.0
             data = await resp.json()
             return {
@@ -64,8 +69,8 @@ async def run_flash_sale_benchmark(
     start_benchmark = time.perf_counter()
     async with aiohttp.ClientSession(connector=conn, timeout=timeout) as session:
         tasks = [
-            send_checkout_request(session, uid)
-            for uid in user_ids
+            send_checkout_request(session, uid, base_url=TARGETS[i % len(TARGETS)])
+            for i, uid in enumerate(user_ids)
         ]
         results: List[Dict[str, Any]] = await asyncio.gather(*tasks)
 
