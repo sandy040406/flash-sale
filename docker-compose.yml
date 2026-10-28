@@ -30,7 +30,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - RUN_WORKER=0
-      - DEMO_MODE=${DEMO_MODE:-0}
+      - DEMO_MODE=${DEMO_MODE:-1}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - TRUST_PROXY_HEADERS=1
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
@@ -76,7 +76,7 @@ services:
       - TARGET_CPU_PERCENT=${TARGET_CPU_PERCENT:-50}
       - SCALE_DOWN_STABILIZATION_SECONDS=${SCALE_DOWN_STABILIZATION_SECONDS:-60}
       # compose re-evaluates the file when scaling; keep these identical to the API service
-      - DEMO_MODE=${DEMO_MODE:-0}
+      - DEMO_MODE=${DEMO_MODE:-1}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
       - WORKER_REPLICAS=${WORKER_REPLICAS:-2}
     volumes:

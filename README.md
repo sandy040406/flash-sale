@@ -73,20 +73,33 @@ flash-sale-system/
 
 ## ⚡ Quick Start
 
-### Full topology (recommended)
-```bash
-# Windows PowerShell:
-$env:DEMO_MODE=1; docker compose up -d --build
+### Run it (one command)
 
-# macOS / Linux / Git Bash:
-DEMO_MODE=1 docker compose up -d --build
+**Prerequisites:** Docker Desktop (or Docker Engine + Compose v2) running, and ports 80, 5432 and 6379 free. Nothing else is needed (no Python or Node install).
+
+1. Unzip the archive and open a terminal **in the folder that contains `docker-compose.yml`**. Some unzip tools create a second nested `flash-sale-system` folder; if you get `no configuration file provided: not found`, `cd` one level deeper.
+2. Run the same command in any shell (PowerShell, cmd, bash):
 ```
-Open **http://localhost/**. Starts NGINX, 2 API replicas (autoscaled up to 8), 2 workers, the autoscaler, Redis and Postgres.
+docker compose up -d --build
+```
+3. Wait about a minute for the first build, then open **http://localhost/**.
+
+This starts NGINX, 2 API replicas (autoscaled up to 8), 2 workers, the autoscaler, Redis and Postgres. `docker compose ps` should show everything `Up`/`healthy`.
+Stop everything with `docker compose down` (add `-v` to also wipe the data).
+
+The compose file runs in **demo mode by default** so the evaluator can use the Audit Lab buttons (500-user rush, reset) from one browser. For a production-style run, start it with `DEMO_MODE=0` and an `ADMIN_TOKEN` (see the table below).
+
+**Troubleshooting**
+- *Page won't load / connection refused:* run `docker compose ps`; if NGINX is not `Up`, run `docker compose logs nginx`. Another program using port 80 is the usual cause.
+- *Docker errors about the daemon / pipe:* start Docker Desktop and wait until it says it is running.
+- *Another copy of this project is running:* run `docker compose down` in that folder first (both use the project name `flash-sale-system`).
+- *PowerShell and `curl`:* use `curl.exe`, because `curl` is a PowerShell alias with different syntax.
+
 Watch scaling decisions with `docker logs -f flash_autoscaler`.
 
 | Setting (env) | Default | Purpose |
 |---|---|---|
-| `DEMO_MODE` | `0` | Enables unlimited demo/naive endpoints and tokenless `/admin/reset`. **Never in production.** |
+| `DEMO_MODE` | `1` in compose (`0` in the app) | Enables unlimited demo/naive endpoints and tokenless `/admin/reset`. **Never in production.** |
 | `ADMIN_TOKEN` | empty | `X-Admin-Token` that allows `/api/v1/admin/reset` when demo mode is off. |
 | `MIN_REPLICAS` / `MAX_REPLICAS` | `2` / `8` | Autoscaling bounds for the API tier. |
 | `TARGET_CPU_PERCENT` | `50` | Average CPU the autoscaler aims for (100 = one full core per replica). |
@@ -96,7 +109,7 @@ Watch scaling decisions with `docker logs -f flash_autoscaler`.
 ### Schedule the 8:00 PM opening
 The sale window lives in Redis and is enforced **inside the Lua script using the Redis server clock**, so a wrong device clock can't open the sale early.
 ```bash
-curl -X POST "http://localhost/api/v1/admin/reset?starts_in=60"   # opens in 60 s (needs DEMO_MODE=1 or the admin token)
+curl.exe -X POST "http://localhost/api/v1/admin/reset?starts_in=60"   # opens in 60 s (needs demo mode or the admin token; use plain `curl` outside PowerShell)
 ```
 The page shows a countdown and keeps the button locked until the server says the sale is live. In the Audit lab, "Reset, open in 30 s" does the same.
 
@@ -236,7 +249,7 @@ Extrapolation, clearly **not demonstrated**: 10,000 req/s needs roughly 30 API c
 | Clean rebuild (`docker compose down -v`, then `up --build`) | Everything starts from scratch | All containers healthy; oversell demo and 20,000-request run passed |
 
 ### Suggested manual checks
-1. Start the stack (commands in Quick Start), open http://localhost/, click **Claim your phone**: one tile turns grey and the ticket moves to Confirmed.
+1. Start the stack (`docker compose up -d --build`), open http://localhost/, click **Claim your phone**: one tile turns grey and the ticket moves to Confirmed.
 2. Open **Audit Lab**, press **Simulate 500-user rush**: stock goes to 0, "Oversold" stays 0, the banner says consistent.
 3. **Reset, open in 30 s**: the button stays locked until the countdown ends, then unlocks.
 4. Run `docker logs -f flash_autoscaler` during a load test to watch replicas scale.
