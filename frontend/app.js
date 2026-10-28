@@ -17,7 +17,7 @@ const userIdInput = document.getElementById('userIdInput');
 const randomUserBtn = document.getElementById('randomUserBtn');
 
 const stockCount = document.getElementById('stockCount');
-const stockBar = document.getElementById('stockBar');
+const unitWall = document.getElementById('unitWall');
 const countdownTimer = document.getElementById('countdownTimer');
 const engineStatus = document.getElementById('engineStatus');
 
@@ -43,6 +43,34 @@ const auditOversold = document.getElementById('auditOversold');
 const consistencyBanner = document.getElementById('consistencyBanner');
 const simulateRushBtn = document.getElementById('simulateRushBtn');
 const resetSaleBtn = document.getElementById('resetSaleBtn');
+
+// ============================================================================
+// Unit wall: one cell per physical phone, drained right-to-left as stock falls.
+// ============================================================================
+const TOTAL_UNITS = 500;
+const wallCells = [];
+let renderedStock = TOTAL_UNITS;
+
+function buildWall() {
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < TOTAL_UNITS; i++) {
+    const cell = document.createElement('i');
+    wallCells.push(cell);
+    frag.appendChild(cell);
+  }
+  unitWall.appendChild(frag);
+}
+
+function setStock(n) {
+  n = Math.max(0, Math.min(TOTAL_UNITS, Number(n) || 0));
+  currentStock = n;
+  stockCount.textContent = n;
+  unitWall.setAttribute('aria-label', `${n} of ${TOTAL_UNITS} units remaining`);
+  const lo = Math.min(n, renderedStock);
+  const hi = Math.max(n, renderedStock);
+  for (let i = lo; i < hi; i++) wallCells[i].classList.toggle('is-claimed', i >= n);
+  renderedStock = n;
+}
 
 // ============================================================================
 // Phase A.3: Optimized Local State Manager
@@ -95,6 +123,7 @@ if (protocolModeSelect) {
 
 // 1. Initialization
 document.addEventListener('DOMContentLoaded', () => {
+  buildWall();
   fetchProductStatus();
   fetchAuditStats();
   startStockPolling();
@@ -109,19 +138,18 @@ async function fetchProductStatus() {
     if (!res.ok) throw new Error('API unreachable');
     const data = await res.json();
     
-    currentStock = data.remaining_stock;
     stateManager.set({ currentStock: data.remaining_stock });
-    stockCount.textContent = data.remaining_stock;
-    const percentage = Math.max(0, (data.remaining_stock / 500) * 100);
-    stockBar.style.width = `${percentage}%`;
+    setStock(data.remaining_stock);
 
     if (data.remaining_stock <= 0) {
       buyButton.disabled = true;
-      buyBtnText.textContent = "SOLD OUT (ALL 500 CLAIMED)";
+      buyBtnText.textContent = "Sold out";
     }
-    engineStatus.textContent = "ONLINE (REDIS LUA ACTIVE)";
+    engineStatus.textContent = "Live";
+    engineStatus.dataset.state = "live";
   } catch (err) {
-    engineStatus.textContent = "OFFLINE";
+    engineStatus.textContent = "Offline";
+    engineStatus.dataset.state = "offline";
     console.warn('API error:', err);
   }
 }
@@ -138,18 +166,21 @@ buyButton.addEventListener('click', async () => {
   
   const userId = userIdInput.value.trim();
   if (!userId) {
-    alert("Please provide a user ID.");
+    userIdInput.classList.add('invalid');
+    userIdInput.focus();
     return;
   }
+
+  userIdInput.classList.remove('invalid');
 
   // 1. Instant UI Lock (First Click Lock)
   isSubmitting = true;
   buyButton.disabled = true;
   btnSpinner.style.display = 'inline-block';
-  buyBtnText.textContent = "RESERVING TOKEN...";
+  buyBtnText.textContent = "Reserving your unit";
 
   // 2. Optimistic UI Display
-  showTicketCard("tok_requesting...", "QUEUED", "Acquiring Redis Atomic Token...", "Executing atomic Lua decrement in Redis memory...");
+  showTicketCard("tok_requesting...", "QUEUED", "Reserving your unit", "Checking stock in memory.");
   resetTicketSteps();
   stepRedis.classList.add('step-done');
 
@@ -172,42 +203,40 @@ buyButton.addEventListener('click', async () => {
       ticketIdDisplay.textContent = ticketId;
       stepStream.classList.add('step-done');
       
-      updateTicketUI("PROCESSING", "Token Acquired! In Processing Queue", "Asynchronous Redis Stream worker persisting transaction to database...");
+      updateTicketUI("PROCESSING", "Unit reserved", "Your order is in the queue and is being saved.");
       
       // Start real-time tracking (SSE with polling fallback)
       trackTicketStatus(ticketId);
 
       // Instantly decrement local stock optimistically
-      currentStock = Math.max(0, currentStock - 1);
-      stockCount.textContent = currentStock;
-      stockBar.style.width = `${(currentStock / 500) * 100}%`;
+      setStock(currentStock - 1);
     } 
     else if (response.status === 410) {
       // Sold Out
-      updateTicketUI("FAILED", "Sale Ended — Sold Out", result.message);
-      buyBtnText.textContent = "SOLD OUT";
+      updateTicketUI("FAILED", "Sold out", "All 500 units have been claimed.");
+      buyBtnText.textContent = "Sold out";
       buyButton.disabled = true;
       isSubmitting = false;
       btnSpinner.style.display = 'none';
     } 
     else if (response.status === 409) {
       // Duplicate order
-      updateTicketUI("FAILED", "Order Limit Reached", result.message);
-      buyBtnText.textContent = "ALREADY ORDERED";
+      updateTicketUI("FAILED", "Already claimed", "This customer ID already has a unit. Use a different ID to claim another.");
+      buyBtnText.textContent = "Already claimed";
       buyButton.disabled = false;
       isSubmitting = false;
       btnSpinner.style.display = 'none';
     }
     else {
       // 429 (rate limited), 5xx, etc: release the lock so the user is never stuck
-      updateTicketUI("FAILED", response.status === 429 ? "Too Many Requests" : "Checkout Unavailable", result.message || "Please try again in a moment.");
-      buyBtnText.textContent = "CLAIM SMARTPHONE NOW";
+      updateTicketUI("FAILED", response.status === 429 ? "Too many requests" : "Checkout unavailable", response.status === 429 ? "Slow down and try again in a few seconds." : "Try again in a moment.");
+      buyBtnText.textContent = "Claim your phone";
       buyButton.disabled = false;
       isSubmitting = false;
       btnSpinner.style.display = 'none';
     }
   } catch (err) {
-    updateTicketUI("FAILED", "Network Connection Error", "Could not reach flash sale cluster.");
+    updateTicketUI("FAILED", "Connection lost", "Check your network and try again.");
     buyButton.disabled = false;
     isSubmitting = false;
     btnSpinner.style.display = 'none';
@@ -281,10 +310,10 @@ function handleTicketStatusUpdate(data) {
     stepDb.classList.add('step-done');
     updateTicketUI(
       "CONFIRMED", 
-      `🎉 Order Confirmed! (Order #${data.order_id || 'OK'})`, 
-      "Smartphone inventory secured with ACID database persistence."
+      `Order confirmed${data.order_id ? ' (#' + data.order_id + ')' : ''}`,
+      "Your phone is secured and the order is saved."
     );
-    buyBtnText.textContent = "CLAIMED SUCCESSFULLY";
+    buyBtnText.textContent = "Claimed";
     btnSpinner.style.display = 'none';
     fetchAuditStats();
   } else if (data.status === 'FAILED') {
@@ -292,8 +321,8 @@ function handleTicketStatusUpdate(data) {
     if (timer) clearInterval(timer);
     stateManager.set({ status: 'FAILED', isSubmitting: false, pollingInterval: null });
 
-    updateTicketUI("FAILED", "Order Failed", data.message);
-    buyBtnText.textContent = "CLAIM SMARTPHONE NOW";
+    updateTicketUI("FAILED", "Order failed", data.message);
+    buyBtnText.textContent = "Claim your phone";
     buyButton.disabled = false;
     btnSpinner.style.display = 'none';
   }
@@ -359,7 +388,7 @@ randomUserBtn.addEventListener('click', () => {
   generateRandomUserId();
   buyButton.disabled = false;
   isSubmitting = false;
-  buyBtnText.textContent = "CLAIM SMARTPHONE NOW";
+  buyBtnText.textContent = "Claim your phone";
   ticketCard.style.display = 'none';
   btnSpinner.style.display = 'none';
 });
@@ -407,29 +436,32 @@ function updateAuditStatsUI(stats) {
   auditOrders.textContent = stats.database_confirmed_orders;
   auditOversold.textContent = stats.oversold_count;
 
-  if (stats.is_perfectly_consistent) {
-    consistencyBanner.innerHTML = `<span class="icon">✅</span><span class="text">System State: <strong>PERFECTLY CONSISTENT</strong> (0 Discrepancy, 500 Settled)</span>`;
-    consistencyBanner.style.background = 'rgba(16, 185, 129, 0.15)';
-    consistencyBanner.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-    consistencyBanner.style.color = '#a7f3d0';
+  let state, text;
+  if (stats.oversold_count > 0) {
+    state = 'bad';
+    text = `Oversold by ${stats.oversold_count}. Stock accounting is broken.`;
+  } else if (stats.is_perfectly_consistent && stats.database_confirmed_orders > 0) {
+    state = 'ok';
+    text = `Consistent. ${stats.database_confirmed_orders} saved, ${stats.redis_remaining_stock} left, 0 oversold.`;
   } else if ((stats.in_transit_queue_count || 0) > 0) {
-    consistencyBanner.innerHTML = `<span class="icon">⚡</span><span class="text">Asynchronous Queue Active: Worker Persisting <strong>${stats.in_transit_queue_count}</strong> to DB...</span>`;
-    consistencyBanner.style.background = 'rgba(245, 158, 11, 0.15)';
-    consistencyBanner.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-    consistencyBanner.style.color = '#fde68a';
+    state = 'busy';
+    text = `Saving ${stats.in_transit_queue_count} queued orders to the database.`;
+  } else if (stats.is_perfectly_consistent) {
+    state = 'ok';
+    text = 'Consistent. No orders yet.';
   } else {
-    consistencyBanner.innerHTML = `<span class="icon">ℹ️</span><span class="text">Sale in Progress (${stats.redis_remaining_stock} available)</span>`;
-    consistencyBanner.style.background = 'rgba(56, 189, 248, 0.15)';
-    consistencyBanner.style.borderColor = 'rgba(56, 189, 248, 0.4)';
-    consistencyBanner.style.color = '#bae6fd';
+    state = 'idle';
+    text = `Sale in progress, ${stats.redis_remaining_stock} units available.`;
   }
+  consistencyBanner.dataset.state = state;
+  consistencyBanner.querySelector('p').textContent = text;
 }
 
 // 9. Reset Flash Sale Button
 resetSaleBtn.addEventListener('click', async () => {
   if (!confirm("Reset flash sale back to 500 items?")) return;
   resetSaleBtn.disabled = true;
-  resetSaleBtn.textContent = "Resetting...";
+  resetSaleBtn.textContent = "Resetting";
   try {
     const res = await fetch(`${API_BASE}/api/v1/admin/reset`, { method: 'POST' });
     const data = await res.json();
@@ -439,12 +471,12 @@ resetSaleBtn.addEventListener('click', async () => {
     ticketCard.style.display = 'none';
     buyButton.disabled = false;
     isSubmitting = false;
-    buyBtnText.textContent = "CLAIM SMARTPHONE NOW";
+    buyBtnText.textContent = "Claim your phone";
   } catch (e) {
     alert("Failed to reset sale: " + e);
   } finally {
     resetSaleBtn.disabled = false;
-    resetSaleBtn.textContent = "🔄 Reset Flash Sale to 500 Inventory";
+    resetSaleBtn.textContent = "Reset to 500 units";
   }
 });
 
@@ -453,8 +485,8 @@ resetSaleBtn.addEventListener('click', async () => {
 // browser can stand in for 500 distinct users. The real /checkout stays rate-limited.
 simulateRushBtn.addEventListener('click', async () => {
   simulateRushBtn.disabled = true;
-  const idleLabel = "⚡ Trigger Concurrent Spike (500 Requests)";
-  simulateRushBtn.textContent = "Firing 500 Concurrent Requests...";
+  const idleLabel = "Simulate 500 buyers";
+  simulateRushBtn.textContent = "Sending 500 requests";
 
   const outcome = { accepted: 0, soldOut: 0, limited: 0, demoOff: 0, errors: 0 };
   const runId = Math.random().toString(36).substring(2, 9);
@@ -478,13 +510,13 @@ simulateRushBtn.addEventListener('click', async () => {
   fetchProductStatus();
 
   if (outcome.demoOff > 0) {
-    simulateRushBtn.textContent = "Demo mode is OFF on the server (start with DEMO_MODE=1)";
+    simulateRushBtn.textContent = "Demo mode is off (start server with DEMO_MODE=1)";
     setTimeout(() => { simulateRushBtn.disabled = false; simulateRushBtn.textContent = idleLabel; }, 4000);
     return;
   }
 
   simulateRushBtn.textContent =
-    `Accepted ${outcome.accepted} · Sold out ${outcome.soldOut} · Rate-limited ${outcome.limited} · Errors ${outcome.errors} — persisting...`;
+    `${outcome.accepted} accepted · ${outcome.soldOut} sold out · ${outcome.limited} rate-limited · saving orders`;
 
   // Poll until queue is completely settled
   let polls = 0;
@@ -495,14 +527,20 @@ simulateRushBtn.addEventListener('click', async () => {
     if (res.ok) {
       const stats = await res.json();
       updateAuditStatsUI(stats);
-      simulateRushBtn.textContent = `Accepted ${outcome.accepted} · Persisting (${stats.database_confirmed_orders}/500 Confirmed)...`;
+      simulateRushBtn.textContent = `${outcome.accepted} accepted · ${stats.database_confirmed_orders}/500 saved`;
       
       if (stats.is_perfectly_consistent || (stats.in_transit_queue_count === 0 && stats.database_confirmed_orders === 500) || polls > 25) {
         clearInterval(pollTimer);
         simulateRushBtn.disabled = false;
         simulateRushBtn.textContent =
-          `✅ Done: Accepted ${outcome.accepted} · Sold out ${outcome.soldOut} · Rate-limited ${outcome.limited} · Errors ${outcome.errors} (click to run again)`;
+          `Done: ${outcome.accepted} accepted · ${outcome.soldOut} sold out · ${outcome.limited} rate-limited · ${outcome.errors} errors`;
       }
     }
   }, 250);
 });
+
+// Close the audit drawer with Escape; clear the invalid state as the user types
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && auditDrawer.classList.contains('open')) closeDrawerBtn.click();
+});
+userIdInput.addEventListener('input', () => userIdInput.classList.remove('invalid'));

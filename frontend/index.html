@@ -3,222 +3,163 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>goML Flash Drop — High-Concurrency Festival Sale</title>
-  <meta name="description" content="High-concurrency flash sale engine built with Redis Lua atomic tokens and asynchronous stream persistence. Guaranteed zero overselling.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="styles.css">
-  <!-- Edge & CDN Asset Preloading (Phase A.2 Model Reference) -->
-  <link rel="preload" href="styles.css" as="style">
-  <link rel="preload" href="app.js" as="script">
+  <title>goML Flash Drop — Obsidian Elite 5G</title>
+  <meta name="description" content="Festival flash sale: 500 Obsidian Elite 5G phones, one per customer, stock enforced atomically so it can never oversell.">
+  <link rel="icon" type="image/webp" href="assets/goml-logo.webp">
+  <link rel="preload" href="assets/fonts/bricolage.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="assets/phone.webp" as="image" type="image/webp">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- Header / Navigation -->
-  <header class="navbar">
-    <div class="nav-container">
-      <div class="brand">
-        <span class="brand-badge">goML</span>
-        <span class="brand-title">Flash<span class="highlight">Drop</span></span>
-      </div>
-      <div class="nav-stats">
-        <div class="system-health">
-          <span class="pulse-indicator"></span>
-          <span class="health-text">Redis Atomic Engine: <strong id="engineStatus">ONLINE</strong></span>
-        </div>
-        <button id="auditToggleBtn" class="btn-secondary" title="Open System Audit & Concurrency Lab">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          Audit & Architecture Lab
-        </button>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="goML Flash Drop home">
+        <img class="brand-logo" src="assets/goml-logo.webp" width="36" height="36" alt="goML">
+        <span class="brand-name">Flash <em>Drop</em></span>
+      </a>
+      <div class="topbar-right">
+        <span class="sys" title="Reservation engine status">
+          <span class="sys-dot" aria-hidden="true"></span>
+          <span class="sys-label">System</span>
+          <strong id="engineStatus">Live</strong>
+        </span>
+        <button id="auditToggleBtn" class="btn btn-quiet" type="button" aria-controls="auditDrawer">Audit lab</button>
       </div>
     </div>
   </header>
 
-  <!-- Main Hero Stage -->
-  <main class="main-layout">
-    <div class="hero-container">
-      
-      <!-- Product Details & Checkout Column -->
-      <section class="checkout-panel">
-        <div class="event-banner">
-          <span class="fire-icon">🔥</span>
-          <span class="banner-text">ANNUAL FESTIVAL FLASH DROP — STRICTLY 500 UNITS</span>
+  <main class="page">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Festival drop <span aria-hidden="true">/</span> 500 units</p>
+        <h1 class="product-title">Obsidian<br>Elite 5G</h1>
+        <p class="product-subtitle">Limited festival edition. One phone per customer, while stock lasts.</p>
+
+        <div class="price-row">
+          <span class="price-now">$699</span>
+          <span class="price-was">$1,199</span>
+          <span class="price-save">Save 42%</span>
         </div>
 
-        <h1 class="product-title">Obsidian Elite 5G</h1>
-        <p class="product-subtitle">Limited Edition Festival Flagship with Atomic Concurrency Protection</p>
-
-        <div class="pricing-card">
-          <div class="price-group">
-            <span class="current-price">$699</span>
-            <span class="original-price">$1,199</span>
-            <span class="discount-badge">SAVE 42%</span>
-          </div>
-          <div class="timer-box">
-            <span class="timer-label">Flash Sale Ends In</span>
-            <span class="timer-countdown" id="countdownTimer">00:14:59</span>
-          </div>
-        </div>
-
-        <!-- Real-Time Stock Meter -->
-        <div class="stock-meter-container">
-          <div class="stock-header">
-            <span>Remaining Inventory</span>
-            <span class="stock-figures"><strong id="stockCount">500</strong> / 500 Left</span>
-          </div>
-          <div class="progress-track">
-            <div class="progress-fill" id="stockBar" style="width: 100%;"></div>
-          </div>
-        </div>
-
-        <!-- User Identity & Instant Claim -->
-        <div class="action-card">
-          <div class="user-selector">
-            <label for="userIdInput">Customer Identity (Policy: 1 unit per customer)</label>
-            <div class="input-row">
-              <input type="text" id="userIdInput" value="usr_festival_001" autocomplete="off" spellcheck="false">
-              <button id="randomUserBtn" type="button" class="btn-ghost" title="Generate random user ID">🎲 New User</button>
-            </div>
+        <div class="claim">
+          <label class="field-label" for="userIdInput">Customer ID</label>
+          <div class="field-row">
+            <input type="text" id="userIdInput" value="usr_festival_001" autocomplete="off" spellcheck="false">
+            <button id="randomUserBtn" type="button" class="btn btn-ghost">New ID</button>
           </div>
 
-          <!-- The Debounced Buy Button -->
-          <button id="buyButton" class="btn-primary buy-btn" type="button">
-            <span class="btn-spinner" id="btnSpinner" style="display: none;"></span>
-            <span id="buyBtnText">CLAIM SMARTPHONE NOW</span>
+          <button id="buyButton" class="btn-claim" type="button">
+            <span class="btn-spinner" id="btnSpinner" style="display: none;" aria-hidden="true"></span>
+            <span id="buyBtnText">Claim your phone</span>
           </button>
-          <p class="anti-spam-note">⚡ Protected by client-side debounce and single-threaded Redis Lua atomic decrement.</p>
+          <p class="claim-note">Press once. The button locks while your request is in flight, so a double click can't place two claims.</p>
         </div>
 
-        <!-- Real-Time Queue & Ticket Tracking Card -->
-        <div id="ticketCard" class="ticket-card" style="display: none;">
-          <div class="ticket-header">
+        <div id="ticketCard" class="ticket" style="display: none;" aria-live="polite">
+          <div class="ticket-head">
             <div>
-              <span class="ticket-badge">TOKEN RESERVATION TICKET</span>
+              <span class="ticket-label">Claim ticket</span>
               <span id="ticketId" class="ticket-id">tok_...</span>
             </div>
-            <!-- Protocol Mode Selector (Phase A.3 Comparison) -->
-            <div class="protocol-switcher">
-              <label for="protocolModeSelect" class="protocol-label">Protocol:</label>
-              <select id="protocolModeSelect" class="protocol-select" title="Toggle between SSE Stream and Dynamic Polling">
-                <option value="sse">⚡ SSE (Server-Sent Events)</option>
-                <option value="polling">⏱️ Dynamic Polling</option>
+            <label class="proto">
+              <span>Updates via</span>
+              <select id="protocolModeSelect" title="How this page receives status updates">
+                <option value="sse">Live stream (SSE)</option>
+                <option value="polling">Polling</option>
               </select>
+            </label>
+          </div>
+          <div class="ticket-status">
+            <div class="queue-indicator" id="queueIndicator"></div>
+            <div>
+              <h2 id="queueStatusTitle">Reserving your unit</h2>
+              <p id="queueStatusMessage">Checking stock in memory.</p>
             </div>
           </div>
-          <div class="ticket-body">
-            <div class="queue-status-row">
-              <div class="queue-indicator" id="queueIndicator"></div>
-              <div>
-                <h4 id="queueStatusTitle">Acquiring Token...</h4>
-                <p id="queueStatusMessage">Validating request in atomic memory buffer...</p>
-              </div>
-            </div>
-            <div class="ticket-steps">
-              <div class="step-item step-done" id="stepRedis">1. Redis Atomic Token</div>
-              <div class="step-divider"></div>
-              <div class="step-item" id="stepStream">2. Redis Stream Queue</div>
-              <div class="step-divider"></div>
-              <div class="step-item" id="stepDb">3. DB ACID Persistence</div>
-            </div>
-          </div>
+          <ol class="steps">
+            <li class="step-item step-done" id="stepRedis">Unit reserved</li>
+            <li class="step-item" id="stepStream">Order queued</li>
+            <li class="step-item" id="stepDb">Order saved</li>
+          </ol>
         </div>
+      </div>
 
-      </section>
+      <figure class="hero-visual">
+        <picture>
+          <source srcset="assets/phone.webp" type="image/webp">
+          <img src="assets/phone.jpg" width="700" height="700" alt="Obsidian Elite 5G, front and back" loading="eager" fetchpriority="high">
+        </picture>
+        <figcaption class="timer">
+          <span>Sale ends in</span>
+          <strong id="countdownTimer">14:59</strong>
+        </figcaption>
+      </figure>
+    </section>
 
-      <!-- Product Showcase Image Column -->
-      <section class="visual-panel">
-        <div class="image-wrapper">
-          <picture>
-            <source srcset="assets/phone.webp" type="image/webp">
-            <img src="assets/phone.jpg" alt="Obsidian Elite 5G Smartphone" class="product-image" loading="eager" fetchpriority="high">
-          </picture>
-          <div class="floating-pill pill-top">⚡ 100,000 Concurrent Capacity</div>
-          <div class="floating-pill pill-bottom">🛡️ Zero-Overselling Guaranteed</div>
+    <section class="wall" aria-labelledby="wallTitle">
+      <div class="wall-head">
+        <div>
+          <h2 id="wallTitle" class="wall-title">Units remaining</h2>
+          <p class="wall-legend">
+            <span><i class="key key-open"></i>Available</span>
+            <span><i class="key key-claimed"></i>Claimed</span>
+          </p>
         </div>
-      </section>
-
-    </div>
+        <p class="wall-count" aria-live="polite"><strong id="stockCount">500</strong><span> of 500</span></p>
+      </div>
+      <div id="unitWall" class="unit-wall" role="img" aria-label="500 of 500 units remaining"></div>
+    </section>
   </main>
 
-  <!-- System Architecture & Evaluator Drawer -->
-  <aside id="auditDrawer" class="audit-drawer">
-    <div class="drawer-header">
-      <h3>System Audit & Architecture Lab</h3>
-      <button id="closeDrawerBtn" class="btn-close">&times;</button>
+  <aside id="auditDrawer" class="drawer" aria-label="System audit">
+    <div class="drawer-head">
+      <h2>System audit</h2>
+      <button id="closeDrawerBtn" class="drawer-close" type="button" aria-label="Close audit panel">&times;</button>
     </div>
-    
-    <div class="drawer-content">
-      <div class="audit-grid">
-        <div class="audit-stat">
-          <span class="stat-label">Initial Stock</span>
-          <span class="stat-val" id="auditInitial">500</span>
-        </div>
-        <div class="audit-stat">
-          <span class="stat-label">Redis Stock</span>
-          <span class="stat-val highlight-blue" id="auditRedis">500</span>
-        </div>
-        <div class="audit-stat">
-          <span class="stat-label">In-Transit in Queue</span>
-          <span class="stat-val highlight-gold" id="auditInTransit">0</span>
-        </div>
-        <div class="audit-stat">
-          <span class="stat-label">DB Confirmed Orders</span>
-          <span class="stat-val highlight-green" id="auditOrders">0</span>
-        </div>
-        <div class="audit-stat">
-          <span class="stat-label">Oversold Count</span>
-          <span class="stat-val highlight-danger" id="auditOversold">0</span>
-        </div>
+
+    <div class="drawer-body">
+      <p class="drawer-lede">Live reconciliation of what Redis granted against what the database saved.</p>
+
+      <dl class="audit-grid">
+        <div class="audit-stat"><dt>Initial stock</dt><dd id="auditInitial">500</dd></div>
+        <div class="audit-stat"><dt>Redis stock</dt><dd id="auditRedis">500</dd></div>
+        <div class="audit-stat"><dt>In queue</dt><dd id="auditInTransit">0</dd></div>
+        <div class="audit-stat"><dt>Saved orders</dt><dd id="auditOrders">0</dd></div>
+        <div class="audit-stat audit-stat-wide"><dt>Oversold</dt><dd id="auditOversold">0</dd></div>
+      </dl>
+
+      <div class="consistency" id="consistencyBanner" data-state="ok">
+        <span class="consistency-dot" aria-hidden="true"></span>
+        <p>Consistent. Every unit is accounted for.</p>
       </div>
 
-      <div class="consistency-banner" id="consistencyBanner">
-        <span class="icon">✅</span>
-        <span class="text">System State: <strong>PERFECTLY CONSISTENT</strong> (0 Discrepancy)</span>
-      </div>
-
-      <!-- Live Simulator Actions -->
       <div class="drawer-actions">
-        <h4>Live Simulation & Controls</h4>
-        <button id="simulateRushBtn" class="btn-action">
-          ⚡ Trigger Concurrent Spike (500 Requests)
-        </button>
-        <button id="resetSaleBtn" class="btn-action btn-outline">
-          🔄 Reset Flash Sale to 500 Inventory
-        </button>
+        <h3>Simulation</h3>
+        <button id="simulateRushBtn" class="btn btn-solid" type="button">Simulate 500 buyers</button>
+        <button id="resetSaleBtn" class="btn btn-outline" type="button">Reset to 500 units</button>
+        <p class="hint">Simulation needs demo mode on the server. Normal checkout stays rate-limited per IP.</p>
       </div>
 
-      <!-- Core Architecture Highlights for Evaluators -->
-      <div class="arch-notes">
-        <h4>Candidate Evaluation & Reference Framework Compliance</h4>
-        
-        <div class="rubric-block">
-          <div class="rubric-title">Phase A: Frontend Strategy (Client Optimization)</div>
-          <ul>
-            <li><strong>UI Debouncing / Throttling:</strong> Leading-edge instant lock disables button in 0ms on first click, completely blocking duplicate payloads.</li>
-            <li><strong>Asset Pre-fetching & CDN:</strong> Lightweight assets (<55KB total, WebP image 22KB, TTI &lt; 0.2s) served from edge CDN with prefetch resource hints.</li>
-            <li><strong>State Manager & SSE vs Polling:</strong> Reactive local state manager handles waiting room status via Server-Sent Events (SSE) with dynamic polling fallback.</li>
-            <li><strong>Optimistic UI:</strong> Instantly decrements stock locally and displays ticket progress upon HTTP 202 handoff.</li>
-          </ul>
-        </div>
-
-        <div class="rubric-block">
-          <div class="rubric-title">Phase B: Backend & Middleware Architecture</div>
-          <ul>
-            <li><strong>Load Balancing:</strong> NGINX reverse proxy with <code>least_conn</code> distribution across 3 stateless backend replicas and leaky-bucket bot rate limiter.</li>
-            <li><strong>Atomic Distributed Token:</strong> Redis single-threaded Lua script performs check-and-decrement in microsecond RAM (0ms race window).</li>
-            <li><strong>Decoupled Asynchronous Queue:</strong> API offloads checkout to Redis Streams with immediate <code>HTTP 202 Accepted</code> and tracking URL.</li>
-          </ul>
-        </div>
-
-        <div class="rubric-block">
-          <div class="rubric-title">Phase C: Database Consistency & Concurrency Control</div>
-          <ul>
-            <li><strong>Sequential / Micro-Batch Worker:</strong> Decoupled consumer drains Redis Streams and persists orders to database without row lock contention.</li>
-            <li><strong>Strict Conditional SQL:</strong> Executes <code>UPDATE products SET available_stock = available_stock - 1 WHERE id = :id AND available_stock &gt; 0</code> inside an ACID transaction.</li>
-            <li><strong>Zero Overselling Guarantee:</strong> Concurrency at the database level is completely eliminated; exactly 500 orders are written.</li>
-          </ul>
-        </div>
-      </div>
+      <details class="notes">
+        <summary>How it holds up</summary>
+        <h4>Client</h4>
+        <ul>
+          <li>The button locks on the first click, so duplicate requests never leave the browser.</li>
+          <li>Fonts, images and scripts are self-hosted and cached at the NGINX edge, well under 200 KB in total.</li>
+          <li>Status arrives over Server-Sent Events, with polling as a fallback.</li>
+        </ul>
+        <h4>Gateway and app</h4>
+        <ul>
+          <li>NGINX spreads traffic across three stateless replicas and rate-limits each IP.</li>
+          <li>A Redis Lua script checks and decrements stock in one atomic step.</li>
+          <li>Granted claims return <code>202 Accepted</code> with a tracking URL, and go onto a Redis Stream.</li>
+        </ul>
+        <h4>Data</h4>
+        <ul>
+          <li>Workers drain the stream in micro-batches into a shared Postgres.</li>
+          <li>Each write is conditional: <code>stock &gt; 0</code> inside a transaction, so the database can't oversell either.</li>
+        </ul>
+      </details>
     </div>
   </aside>
 
