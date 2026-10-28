@@ -80,6 +80,16 @@ docker compose up --build
 ```
 Access the application through the NGINX edge gateway at **`http://localhost/`**.
 
+### Demo mode (500 users from one browser)
+The real `/api/v1/checkout` is rate-limited per IP (bot protection), so one browser cannot
+place 500 orders through it. For live demos, start the stack with demo mode on:
+```bash
+DEMO_MODE=1 docker compose up -d          # PowerShell: $env:DEMO_MODE=1; docker compose up -d
+```
+The "Trigger Concurrent Spike" button then uses `/api/v1/demo/checkout` (404 unless `DEMO_MODE=1`)
+and reports accepted / sold-out / rate-limited counts. The real endpoint stays rate-limited.
+**Never enable demo mode in production.** Restart without the variable to turn it off.
+
 ---
 
 ## 🛡️ Empirical Benchmark Proof

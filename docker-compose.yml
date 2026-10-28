@@ -26,6 +26,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - DEMO_MODE=${DEMO_MODE:-0}
       - CONSUMER_NAME=worker_node_1
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
@@ -44,6 +45,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - DEMO_MODE=${DEMO_MODE:-0}
       - CONSUMER_NAME=worker_node_2
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:
@@ -62,6 +64,7 @@ services:
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - DEMO_MODE=${DEMO_MODE:-0}
       - CONSUMER_NAME=worker_node_3
       - DATABASE_URL=postgresql+asyncpg://flash:flash@postgres:5432/flashsale
     depends_on:

@@ -144,6 +144,20 @@ async def get_product_status(product_id: int, db: AsyncSession = Depends(get_db)
 
 @app.post("/api/v1/checkout", response_model=CheckoutResponse)
 async def checkout(payload: CheckoutRequest):
+    return await _process_checkout(payload)
+
+@app.post("/api/v1/demo/checkout", include_in_schema=False)
+async def demo_checkout(payload: CheckoutRequest):
+    """Same logic as /checkout but outside the per-IP limiters. 404 unless DEMO_MODE=1."""
+    if not settings.DEMO_MODE:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await _process_checkout(payload)
+
+@app.get("/api/v1/demo/status", include_in_schema=False)
+async def demo_status():
+    return {"demo_mode": settings.DEMO_MODE}
+
+async def _process_checkout(payload: CheckoutRequest):
     """
     High-Concurrency Flash Sale Ingestion Endpoint.
     

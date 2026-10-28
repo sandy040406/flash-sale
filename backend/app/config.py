@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     PRODUCT_ID: int = 1
     INITIAL_STOCK: int = 500
     SALE_ACTIVE: bool = True
+
+    # Demo-only: enables /api/v1/demo/checkout (no per-IP limit) so one browser can
+    # simulate 500 distinct users. Off by default; never enable in production.
+    DEMO_MODE: bool = False
     
     # Rate Limiting & Protection
     MAX_REQUESTS_PER_SEC_PER_IP: int = 50

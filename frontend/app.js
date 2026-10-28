@@ -449,29 +449,42 @@ resetSaleBtn.addEventListener('click', async () => {
 });
 
 // 10. Simulate 500-User Surge Button
+// Uses the demo-only endpoint (no per-IP limit, needs DEMO_MODE=1 on the server) so one
+// browser can stand in for 500 distinct users. The real /checkout stays rate-limited.
 simulateRushBtn.addEventListener('click', async () => {
   simulateRushBtn.disabled = true;
+  const idleLabel = "⚡ Trigger Concurrent Spike (500 Requests)";
   simulateRushBtn.textContent = "Firing 500 Concurrent Requests...";
-  
-  const CHUNK_SIZE = 50;
-  for (let chunk = 0; chunk < 10; chunk++) {
-    const requests = [];
-    for (let i = 0; i < CHUNK_SIZE; i++) {
-      const uid = `sim_rush_${Math.random().toString(36).substring(2, 9)}_${chunk * CHUNK_SIZE + i}`;
-      requests.push(
-        fetch(`${API_BASE}/api/v1/checkout`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: uid, product_id: PRODUCT_ID, quantity: 1 })
-        }).catch(() => null)
-      );
-    }
-    await Promise.all(requests);
-    fetchProductStatus();
-    fetchAuditStats();
+
+  const outcome = { accepted: 0, soldOut: 0, limited: 0, demoOff: 0, errors: 0 };
+  const runId = Math.random().toString(36).substring(2, 9);
+  const requests = [];
+  for (let i = 0; i < 500; i++) {
+    requests.push(
+      fetch(`${API_BASE}/api/v1/demo/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: `sim_rush_${runId}_${i}`, product_id: PRODUCT_ID, quantity: 1 })
+      }).then(r => {
+        if (r.status === 202) outcome.accepted++;
+        else if (r.status === 410) outcome.soldOut++;
+        else if (r.status === 429) outcome.limited++;
+        else if (r.status === 404) outcome.demoOff++;
+        else outcome.errors++;
+      }).catch(() => { outcome.errors++; })
+    );
+  }
+  await Promise.all(requests);
+  fetchProductStatus();
+
+  if (outcome.demoOff > 0) {
+    simulateRushBtn.textContent = "Demo mode is OFF on the server (start with DEMO_MODE=1)";
+    setTimeout(() => { simulateRushBtn.disabled = false; simulateRushBtn.textContent = idleLabel; }, 4000);
+    return;
   }
 
-  simulateRushBtn.textContent = "Draining queue & persisting to DB...";
+  simulateRushBtn.textContent =
+    `Accepted ${outcome.accepted} · Sold out ${outcome.soldOut} · Rate-limited ${outcome.limited} · Errors ${outcome.errors} — persisting...`;
 
   // Poll until queue is completely settled
   let polls = 0;
@@ -482,12 +495,13 @@ simulateRushBtn.addEventListener('click', async () => {
     if (res.ok) {
       const stats = await res.json();
       updateAuditStatsUI(stats);
-      simulateRushBtn.textContent = `Persisting (${stats.database_confirmed_orders}/500 Confirmed)...`;
+      simulateRushBtn.textContent = `Accepted ${outcome.accepted} · Persisting (${stats.database_confirmed_orders}/500 Confirmed)...`;
       
       if (stats.is_perfectly_consistent || (stats.in_transit_queue_count === 0 && stats.database_confirmed_orders === 500) || polls > 25) {
         clearInterval(pollTimer);
         simulateRushBtn.disabled = false;
-        simulateRushBtn.textContent = "⚡ Trigger Concurrent Spike (500 Requests)";
+        simulateRushBtn.textContent =
+          `✅ Done: Accepted ${outcome.accepted} · Sold out ${outcome.soldOut} · Rate-limited ${outcome.limited} · Errors ${outcome.errors} (click to run again)`;
       }
     }
   }, 250);
