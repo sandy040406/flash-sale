@@ -3,7 +3,6 @@
 > **Zero overselling by construction: stock is reserved atomically in Redis and re-checked by the database.**  
 > *Role Evaluation: Full-Stack Software Engineer*  
 
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/Python-3.12-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-green.svg)
 ![Redis](https://img.shields.io/badge/Redis-Streams%20%2B%20Lua-red.svg)
@@ -191,6 +190,52 @@ So the **Python API tier is the bottleneck** (about 330 req/s per replica, rough
 Extrapolation, clearly **not demonstrated**: 10,000 req/s needs roughly 30 API cores (about 4 times this laptop), and Redis would sit near 70% of one core at that rate. That is a handful of ordinary cloud instances, and the API tier is stateless, so it scales by adding replicas. For a known 8 PM launch you would pre-scale (`MIN_REPLICAS`) instead of waiting for the autoscaler to react.
 
 ---
+
+## ✅ Requirements Coverage (case study → this repo)
+
+| Case-study requirement | How it is met | Where / evidence |
+|---|---|---|
+| Frontend bundle < 200 KB | 81 KB first visit (HTML with inlined critical CSS, JS, WebP image, subset fonts) | `frontend/`, Lighthouse run below |
+| Time to Interactive < 1.5 s | Mobile 1,458 ms (simulated slow 4G), desktop 375 ms | Measured Results |
+| Click-spam prevention | Button locks on first click, `isSubmitting` guard, server-side idempotency per user | `frontend/app.js`, `reserve_stock.lua` |
+| Graceful loading / failed queues | Optimistic UI with rollback, step tracker, retry with jittered backoff, SSE with adaptive-polling fallback | `frontend/app.js` |
+| Rate-limit bad actors | NGINX `limit_req` per IP plus a Redis limiter shared by all replicas (no header bypass) | `nginx/nginx.conf`, `rate_limiter.py` |
+| 0% dropped requests | 600,000 requests across six runs plus a final 20,000-request check on a clean rebuild: 0 dropped, including during autoscaling | `tests/sustained_load.py`, `scripts/distributed_load.sh` |
+| Distribute load safely | NGINX `least_conn` over health-checked replicas, autoscaled 2 to 8, drain before removal | `nginx/`, `autoscaler/` |
+| Decouple DB writes | API only touches Redis (202 Accepted); workers persist from a Redis Stream | `worker.py`, `worker_main.py` |
+| Stateless clusters, event-loop safety | No in-process state; all I/O async; event-loop lag measured per replica (`/health`) | Event-loop section below |
+| Exactly 500 sold, ACID, atomic decrements | One Redis Lua script (sale window, idempotency, `DECRBY`, enqueue) plus conditional SQL `UPDATE … WHERE stock > 0` | `reserve_stock.lua`, `/admin/stats` audit |
+| Reproduce / explain the 540 oversell | Naive SELECT-then-UPDATE endpoint vs this system, side by side | `tests/oversell_demo.py` |
+| 8:00 PM opening | Server-driven sale window enforced inside Lua with the Redis clock; countdown synced to server time | `?starts_in=` reset, UI countdown |
+
+## 🧰 Feature Summary
+
+- **UI:** goML-branded, 500-unit live "wall" (one tile per phone turns grey as stock drops, your own unit is highlighted), server-synced countdown, ticket tracker (queued, confirmed), minimal scrollable Audit Lab drawer.
+- **Audit Lab:** live reconciliation of Redis stock, database stock, in-transit queue and confirmed orders with a consistency banner; "Simulate 500-user rush" and "Reset" buttons (demo mode only).
+- **Demo mode (`DEMO_MODE=1`):** lets one browser fire 500 concurrent orders from one IP by bypassing the per-IP limits on a dedicated demo route; off by default, never for production.
+- **Security hardening:** admin reset needs a token (or demo mode), constant-time token compare, client-IP headers trusted only behind NGINX, no User-Agent bypass.
+- **Resilience:** worker crash recovery via `XAUTOCLAIM`, idempotent retries, NGINX retries on another replica, Redis connection pool with back-pressure, health checks.
+- **Autoscaling:** HPA-style controller (target 50% CPU, scale up at most 2x at once, scale down after a 60 s stabilization window), NGINX upstream updated and gracefully reloaded.
+
+## 🧪 Tests Performed
+
+| Test | What it shows | Result |
+|---|---|---|
+| `pytest` (8 integration tests) | Atomic enqueue, no UA bypass, admin/demo gating, crash reclaim, repeat claim returns original ticket, sale window blocks early purchases | 8 passed |
+| `oversell_demo.py`, 3,000 buyers, 300 at a time | Naive code vs this system | Naive: 529 orders (**29 oversold**). This system: **exactly 500, 0 oversold, consistent** |
+| `load_test.py` | 3,000 requests for 500 units | 500 sold, 0 oversold |
+| `sustained_load.py` through NGINX with autoscaling | Dropped-request accounting (served / throttled / DROPPED) | 0 dropped; scaled 2 to 12 replicas with no errors |
+| `distributed_load.sh` (100,000 requests, 5 generators) | Capacity and drops | 0 dropped in 6 runs; 33 to 42 s per run (target of 10 s **not** met, see above) |
+| Lighthouse (3 runs per profile) | TTI and payload | Mobile 1,458 ms, desktop 375 ms, 81 KB |
+| Event-loop lag monitor | No blocked loop | p99 under 60 ms even when saturated |
+| Browser check (Playwright) | Wall tiles update on claim, drawer scrolls, countdown unlocks the button, reset flows | Passed |
+| Clean rebuild (`docker compose down -v`, then `up --build`) | Everything starts from scratch | All containers healthy; oversell demo and 20,000-request run passed |
+
+### Suggested manual checks
+1. `DEMO_MODE=1 docker compose up -d --build`, open http://localhost/, click **Claim your phone**: one tile turns grey and the ticket moves to Confirmed.
+2. Open **Audit Lab**, press **Simulate 500-user rush**: stock goes to 0, "Oversold" stays 0, the banner says consistent.
+3. **Reset, open in 30 s**: the button stays locked until the countdown ends, then unlocks.
+4. Run `docker logs -f flash_autoscaler` during a load test to watch replicas scale.
 
 ## 🧭 Design Notes
 
